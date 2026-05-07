@@ -1,0 +1,43 @@
+base_config: configs/base.yaml
+dataset_config: configs/datasets.yaml
+
+run:
+  dataset_name: local_jsonl_reasoning
+  train_file: data/processed/grpo/train.jsonl
+  validation_file: data/processed/grpo/validation.jsonl
+  output_dir: outputs/grpo/qwen35_4b_lora
+  max_prompt_length: 1536
+  max_completion_length: 768
+  reward_profile: criminal
+  use_vllm: true
+  vllm_server_host: 127.0.0.1
+  vllm_server_port: 8000
+
+trainer:
+  learning_rate: 5.0e-7
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 100
+  beta: 0.04
+  num_generations: 8
+  temperature: 0.9
+  scale_rewards: batch
+
+lora:
+  enabled: true
+  r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - up_proj
+    - down_proj
+    - gate_proj

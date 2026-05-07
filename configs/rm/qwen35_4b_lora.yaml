@@ -1,0 +1,34 @@
+base_config: configs/base.yaml
+dataset_config: configs/datasets.yaml
+
+run:
+  train_file: data/processed/rm/train.jsonl
+  validation_file: data/processed/rm/validation.jsonl
+  output_dir: outputs/rm/qwen35_4b_lora
+  max_length: 4096
+
+trainer:
+  learning_rate: 5.0e-6
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 200
+  eval_steps: 200
+
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
