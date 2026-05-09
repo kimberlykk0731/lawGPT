@@ -1,696 +1,460 @@
-# 中文法律大模型后训练工程（Legal-LM-CN）
+# LegalGPT — 法律垂域全链路实验（2026）
 
-面向中文法律案件分析、判决推理与法律咨询的**端到端后训练流水线**。本仓库由 `lawGPT` 与 `legal-llm-training` 合并演进而来，工程骨架沿用 lawGPT，蒸馏链路吸收 legal-llm-training，整体阶段划分参考 MedicalGPT。
+围绕 Qwen3 全家桶完整复现 **Dense → MoE 分析 → MoE 自造 → 蒸馏部署** 的工业落地链路。
 
-默认基座：**`Qwen3.5-4B-Instruct`**（小参数、强中文，已具备相当的法律基础能力，因此**跳过继续预训练**，直接进入后训练；单卡 A100/4090 即可全流程跑通）。
-
-> 配置中所有 `Qwen3.5-4B-Instruct` 字段均可直接替换为其他基座（Qwen2.5-7B / DeepSeek-V3-Lite / InternLM2.5-7B-chat 等），模板自动通过 `training/template.py` 注册中心选择。
-
----
-
-## 1. 项目特点
-
-- **不做 PT**：4B 基座中文能力足够，PT 投入产出比低；法条与最新案例通过 RAG 注入
-- **单卡可训**：4B + LoRA + bf16 + flash-attention-2，单张 A100 40G / RTX 4090 24G 可全流程跑通
-- **双层奖励体系**
-  - 规则奖励：罪名匹配、法条 Jaccard、量刑相对误差等可验证子任务 → GRPO
-  - 学习型奖励模型 (RM)：说理质量、风险提示、案件分析等开放式任务 → PPO / DPO
-- **CoT 双蒸馏**
-  - 离线蒸馏：DeepSeek-R1 / Qwen-Max 产出 `<think>` 推理数据
-  - On-Policy Distillation (OPD)：SFT 模型自己生成 → 教师改写打分 → 回流训练
-- **法条 RAG**：训练 / 推理两端均注入实时法条，避免参数化记忆失效
-- **模板注册中心**：`training/template.py` 统一管理 Qwen / DeepSeek / GLM / InternLM 模板，换基座只改一行
-- **学界 benchmark**：LawBench + CAIL2018 双基准
-- **可交付**：LoRA 合并、OpenAI 兼容 API、Gradio Demo、vLLM 部署一站式
-- **安全合规**：训练数据脱敏、推理护栏、强制风险提示
+> 个人项目 / 4×H100 / Demo 规模 ~10 GPU·h，简历规模 ~150 GPU·h
+> 数据源：HuggingFace `ShengbinYue/DISC-Law-SFT` · Reward：RLVR (JSON 集合 F1) · 跟踪：SwanLab · 训练：trl + DeepSpeed ZeRO-3
 
 ---
 
-## 2. 与现有项目的差异
+## 0. 一分钟跑通（demo 规模，能在 swanlab 出图）
 
-| 维度 | 本项目 | lawGPT(原) | legal-llm-training | MedicalGPT |
-|---|---|---|---|---|
-| PT | ❌（基座已具备） | ❌ | ❌ | ✅ |
-| SFT | ✅ 三种 CoT 模式 | ✅ | ✅ | ✅ |
-| 离线 CoT 蒸馏 | ✅ DeepSeek-R1 | ❌ | ✅ | ❌ |
-| OPD（在线蒸馏） | ✅ | ❌ | ❌ | ✅ |
-| 学习型 RM | ✅ | ❌ | ❌ | ✅ |
-| PPO | ✅（基于 RM） | ❌ | ❌ | ✅ |
-| GRPO + 规则奖励 | ✅（多领域） | ✅ | ✅ | ⚠️ 仅通用 |
-| DPO / ORPO | ✅ | ✅ | ❌ | ✅ |
-| 法条 RAG | ✅ | ❌ | ❌ | ❌ |
-| LawBench / CAIL 评测 | ✅ | ⚠️ 自定义 | ⚠️ 部分 | ❌ |
-| 部署链路 | ✅ | ❌ | ❌ | ✅ |
-| 单卡可训 | ✅ (4B) | ⚠️ (7B) | ⚠️ (7B) | ❌ |
+```bash
+# 准备代码 + 装依赖
+git clone <repo> && cd lawGPT
+pip install -e ".[vllm,deepspeed]"
+pip install swanlab mergekit flash-attn
+
+export SWANLAB_PROJECT=legalgpt-2026
+export SWANLAB_API_KEY=<your-key>           # 或 export SWANLAB_MODE=local
+export PYTHONPATH=$PWD:$PYTHONPATH
+
+# 全部数据一键准备（HF 下载 + 多任务模板合成 + 长尾重采样 + 划分 train/test）
+python stages/data_prep.py --out data
+# → data/processed/sft_demo/ data/processed/rlvr_demo/ ... 全套就绪
+```
+
+后面按 §4 的 stage 命令依次跑即可。如果想跑简历规模（350k SFT / 20k RLVR），改成
+`python stages/data_prep.py --full --out data`。
 
 ---
 
-## 3. 目录结构
+## 1. 项目目标（5 个 Stage）
 
-```text
-configs/
-  base.yaml                         # 模型/路径/系统提示词
-  datasets.yaml                     # 数据源注册
-  ds_zero2.json                     # DeepSpeed ZeRO-2（多卡推荐）
-  ds_zero3.json                     # DeepSpeed ZeRO-3（仅大模型回退用）
-  sft/qwen35_4b_lora.yaml
-  opd/qwen35_4b_lora.yaml
-  dpo/qwen35_4b_lora.yaml
-  rm/qwen35_4b_lora.yaml
-  grpo/qwen35_4b_lora.yaml
-  ppo/qwen35_4b_lora.yaml
-scripts/
-  # 数据
-  build_corpus.py                   # 法律语料清洗 + 脱敏
-  build_statute_index.py            # 法条 RAG 向量索引
-  build_sft_dataset.py              # SFT 数据构建（含 RAG 注入）
-  distill_cot.py                    # 离线 CoT 蒸馏（DeepSeek-R1 等）
-  build_opd_dataset.py              # OPD 数据生成（自采样 + 教师改写）
-  build_preference_dataset.py       # DPO/ORPO 偏好对
-  build_rm_dataset.py               # RM 训练数据
-  build_grpo_dataset.py             # GRPO 可验证任务数据
-  build_ppo_dataset.py              # PPO prompt 数据
-  # 训练
-  train_sft.py
-  train_opd.py
-  train_dpo.py
-  train_rm.py
-  train_grpo.py
-  train_ppo.py
-  merge_lora.py                     # LoRA 合并到基座
-  # 评测
-  run_eval.py                       # 调度 LawBench / CAIL
-demo/
-  inference.py                      # CLI 推理
-  openai_api.py                     # OpenAI 兼容 API
-  gradio_demo.py                    # 前端 demo
-src/legal_lm/
-  data/
-    schema.py                       # 统一 LegalSample
-    redact.py                       # PII 脱敏
-    rag.py                          # 法条检索
-    distill.py                      # CoT 蒸馏 client
-    loaders/                        # cail / jec_qa / lecard / local
-  training/
-    template.py                     # 模板注册中心
-    sft.py
-    opd.py
-    dpo.py
-    rm.py
-    grpo.py
-    ppo.py
-    common.py                       # TRL 兼容层
-  rewards/
-    common.py                       # 通用：法条/事实/结构/风险/格式
-    criminal.py                     # 刑事
-    civil.py                        # 民事/侵权
-    administrative.py               # 行政
-    learned_rm.py                   # 学习型 RM 包装
-    composite.py                    # 规则 + 学习型组合
-  eval/
-    lawbench.py                     # LawBench runner
-    cail.py                         # CAIL2018 runner
-    report.py                       # Markdown 报告
-  safety/
-    guardrails.py                   # 推理护栏
-data/
-  raw/                              # 原始（判决书、法规、公开 QA）
-  statute_index/                    # 法条 FAISS 索引
-  processed/
-    sft_brief/  sft_cot/  sft_answer_only/
-    preference/  rm/  grpo/  ppo/  opd/
-outputs/
-  sft/  opd/  dpo/  rm/  grpo/  ppo/  merged/
-  eval/
-```
-
----
-
-## 4. 环境准备
-
-要求：Python ≥ 3.10、CUDA ≥ 12.1、PyTorch ≥ 2.3、显存 ≥ 24G（单卡 4090/A100 即可，多卡可加速并支持更长上下文）。
-
-```bash
-python3 -m pip install -e .
-python3 -m pip install -e ".[dev,vllm,serve]"
-```
-
-环境变量（`.env.example`）：
-
-```bash
-HF_TOKEN=
-WANDB_PROJECT=legal-lm-cn
-WANDB_ENTITY=
-DEEPSEEK_API_KEY=                   # 离线蒸馏 / OPD 教师
-QWEN_API_KEY=
-CUDA_VISIBLE_DEVICES=0
-VLLM_HOST=127.0.0.1
-VLLM_PORT=8000
-```
-
----
-
-## 5. 数据流水线
-
-### 5.1 统一 Schema（`src/legal_lm/data/schema.py`）
-
-核心字段：`sample_id / domain / task_type / facts / issues / statutes / gold_answer / gold_reasoning / brief_reasoning / distilled_cot / citations / chosen / rejected / metadata`。
-
-`domain ∈ {criminal, civil, administrative, general}`。
-
-### 5.2 原始语料清洗 + 脱敏
-
-数据来源建议：判决文书（OpenLaw / 文书网公开）、现行法律法规全文、司法解释、公开法律 QA（CrimeKgAssitant、LawGPT-zh-data 等）。
-
-```bash
-python3 scripts/build_corpus.py \
-  --input-dir data/raw/judgments_raw \
-  --output-dir data/raw/judgments_clean \
-  --redact \
-  --min-length 200 --max-length 16000
-```
-
-`--redact` 启用脱敏（`src/legal_lm/data/redact.py`）：
-- 当事人姓名 → `[当事人A]` / `[当事人B]`
-- 身份证号、银行卡号、手机号 → 全部 mask
-- 案号保留前缀年份，去掉细节编号
-- 详细住址 → 保留区县级
-
-### 5.3 法条 RAG 索引
-
-```bash
-python3 scripts/build_statute_index.py \
-  --statute-dir data/raw/statutes \
-  --output-dir data/statute_index \
-  --embed-model BAAI/bge-base-zh-v1.5 \
-  --chunk-size 256
-```
-
-产出 FAISS 索引 + `statute_meta.jsonl`。训练 / 推理时通过 `from legal_lm.data.rag import StatuteRetriever` 调用，`top_k` 默认 5，注入到 prompt 的 `【参考法条】` 段。
-
-### 5.4 SFT 数据构建（三种 CoT 模式）
-
-```bash
-# answer-only
-python3 scripts/build_sft_dataset.py \
-  --dataset-name local_jsonl_reasoning \
-  --output-dir data/processed/sft_answer_only \
-  --mode answer_only --inject-rag --rag-top-k 5 \
-  --splits train validation test
-
-# brief reasoning（推荐基线）
-python3 scripts/build_sft_dataset.py \
-  --dataset-name local_jsonl_reasoning \
-  --output-dir data/processed/sft_brief \
-  --mode brief_reasoning --inject-rag --rag-top-k 5 \
-  --splits train validation test
-
-# distilled CoT（依赖 5.5 蒸馏产物）
-python3 scripts/build_sft_dataset.py \
-  --dataset-name local_jsonl_reasoning \
-  --output-dir data/processed/sft_cot \
-  --mode distilled_cot --inject-rag --rag-top-k 5 \
-  --splits train validation test
-```
-
-`--inject-rag`：构造时检索 top-k 法条拼到 prompt 中，让模型学会"看着法条说话"，减少幻觉。
-
-### 5.5 离线 CoT 蒸馏（迁移自 legal-llm-training）
-
-```bash
-python3 scripts/distill_cot.py \
-  --api deepseek --model deepseek-reasoner \
-  --input data/processed/sft_brief/train.jsonl \
-  --output data/processed/distilled/train.jsonl \
-  --workers 8 --max-samples 50000 \
-  --enforce-structure
-```
-
-`--enforce-structure`：强制 `<think>` 内出现"争点 / 大前提 / 小前提 / 结论"四段，否则丢弃，提升 CoT 质量。
-
-### 5.6 OPD（On-Policy Distillation）数据
-
-```bash
-# 1) SFT 模型自采样
-python3 scripts/build_opd_dataset.py sample \
-  --model-path outputs/sft/qwen35_4b_lora/merged \
-  --input data/processed/sft_brief/train.jsonl \
-  --output data/processed/opd/student_samples.jsonl \
-  --temperature 0.8 --num-samples-per-prompt 4
-
-# 2) 教师模型改写 + 打分
-python3 scripts/build_opd_dataset.py refine \
-  --api deepseek --model deepseek-reasoner \
-  --input data/processed/opd/student_samples.jsonl \
-  --output data/processed/opd/train.jsonl \
-  --keep-top 1
-```
-
-### 5.7 偏好数据 / RM / GRPO / PPO
-
-```bash
-# DPO/ORPO 偏好对
-python3 scripts/build_preference_dataset.py \
-  --dataset-name local_jsonl_reasoning \
-  --output-dir data/processed/preference \
-  --splits train validation
-
-# RM 训练数据（与偏好同源，但格式不同）
-python3 scripts/build_rm_dataset.py \
-  --preference-dir data/processed/preference \
-  --output-dir data/processed/rm
-
-# GRPO 可验证子任务（罪名 / 法条 / 量刑）
-python3 scripts/build_grpo_dataset.py \
-  --dataset-name cail2018 \
-  --output-dir data/processed/grpo \
-  --task-types charge,article,sentencing
-
-# PPO prompt 数据
-python3 scripts/build_ppo_dataset.py \
-  --dataset-name local_jsonl_reasoning \
-  --output-dir data/processed/ppo
-```
-
----
-
-## 6. 训练流水线
-
-### 6.1 推荐端到端路线
-
-```
-基座 Qwen3.5-4B-Instruct
-        │
-        ▼
-[阶段 A] SFT（brief_reasoning + distilled_cot 混合，3:7）
-        │
-        ▼
-[阶段 B] OPD（可选，开放式任务收益明显）
-        │
-        ├──▶ [阶段 C1] GRPO（可验证子任务，规则奖励）
-        │
-        ├──▶ [阶段 C2] DPO/ORPO（开放说理，偏好对）
-        │
-        └──▶ [阶段 C3] RM → PPO（开放说理，学习型奖励）
-                    │
-                    ▼
-            合并 LoRA → 部署
-```
-
-资源紧张时推荐 **SFT → DPO**；追求质量上限推荐 **SFT → OPD → GRPO（子任务）+ DPO（说理）**；偏好数据 ≥ 10w 对时再上 **RM + PPO**。
-
-### 6.2 SFT
-
-配置：`configs/sft/qwen35_4b_lora.yaml`
-
-```yaml
-base_config: configs/base.yaml
-dataset_config: configs/datasets.yaml
-run:
-  dataset_name: local_jsonl_reasoning
-  sft_mode: distilled_cot
-  mixed_modes:                      # 混合训练
-    distilled_cot: 0.7
-    brief_reasoning: 0.3
-  output_dir: outputs/sft/qwen35_4b_lora
-  max_seq_length: 4096
-  packing: true
-  inject_rag: true
-trainer:
-  learning_rate: 2.0e-5
-  num_train_epochs: 3
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 8
-  warmup_ratio: 0.03
-  lr_scheduler_type: cosine
-  bf16: true
-  gradient_checkpointing: true
-  attn_implementation: flash_attention_2
-lora:
-  enabled: true
-  r: 64
-  lora_alpha: 128
-  lora_dropout: 0.05
-  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, down_proj, gate_proj]
-```
-
-启动（单卡）：
-
-```bash
-python3 scripts/train_sft.py --config configs/sft/qwen35_4b_lora.yaml
-```
-
-启动（多卡 ZeRO-2）：
-
-```bash
-deepspeed --num_gpus 4 scripts/train_sft.py \
-  --config configs/sft/qwen35_4b_lora.yaml \
-  --deepspeed configs/ds_zero2.json
-```
-
-### 6.3 OPD
-
-```bash
-python3 scripts/train_opd.py --config configs/opd/qwen35_4b_lora.yaml
-```
-
-OPD 在 SFT 模型基础上继续训：loss = SFT loss(教师改写文本) + KL(student || teacher 在 student 采样上)，由 `src/legal_lm/training/opd.py` 实现。
-
-### 6.4 DPO / ORPO
-
-```bash
-# DPO
-python3 scripts/train_dpo.py --config configs/dpo/qwen35_4b_lora.yaml
-
-# ORPO（无需参考模型，更省显存）
-# 修改配置 run.alignment_method: orpo 后用同一脚本
-python3 scripts/train_dpo.py --config configs/dpo/qwen35_4b_lora.yaml
-```
-
-关键参数：`beta: 0.1`，`loss_type: sigmoid`（DPO）/ `orpo_alpha: 0.1`（ORPO）。
-
-### 6.5 奖励模型 (RM)
-
-```bash
-python3 scripts/train_rm.py --config configs/rm/qwen35_4b_lora.yaml
-```
-
-RM 基于 SFT 模型加 value-head，在偏好对（chosen/rejected）上训 ranking loss。产出用于 PPO 与离线打分。
-
-### 6.6 GRPO（规则奖励，可验证子任务）
-
-配置：`configs/grpo/qwen35_4b_lora.yaml`
-
-```yaml
-run:
-  reward_profile: criminal          # criminal | civil | administrative | general
-  use_vllm: true                    # vLLM 加速 rollout
-  vllm_server_host: 127.0.0.1
-trainer:
-  learning_rate: 5.0e-7
-  num_generations: 8
-  beta: 0.04
-  scale_rewards: batch
-  temperature: 0.9
-```
-
-`reward_profile` 选定的规则奖励组合（例 criminal）：
-- `charge_match_reward`（罪名）
-- `article_match_reward`（法条）
-- `sentencing_band_reward`（量刑区间）
-- `element_coverage_reward`（构成要件覆盖）
-- `format_reward`（结构合规）
-
-启动：
-
-```bash
-# 先起 vLLM rollout 服务（4B 单卡即可）
-python3 -m vllm.entrypoints.openai.api_server \
-  --model outputs/sft/qwen35_4b_lora/merged --port 8000
-
-# 再启动 GRPO
-python3 scripts/train_grpo.py --config configs/grpo/qwen35_4b_lora.yaml
-```
-
-### 6.7 PPO（学习型 RM，开放式任务）
-
-```bash
-# vLLM rollout
-python3 -m vllm.entrypoints.openai.api_server \
-  --model outputs/sft/qwen35_4b_lora/merged --port 8000
-
-# PPO
-python3 scripts/train_ppo.py --config configs/ppo/qwen35_4b_lora.yaml
-```
-
-PPO 配置默认 `kl_coef: 0.05`、`reward_model_path: outputs/rm/qwen35_4b_lora`。RM 输出的标量奖励**可以叠加规则奖励的子集**（如 `format_reward + caution_compliance_reward`），权重在 `configs/ppo/*.yaml` 的 `reward.composite` 段配置。
-
-### 6.8 合并 LoRA
-
-```bash
-python3 scripts/merge_lora.py \
-  --base-model Qwen/Qwen3.5-4B-Instruct \
-  --adapter outputs/sft/qwen35_4b_lora \
-  --output outputs/sft/qwen35_4b_lora/merged \
-  --dtype bfloat16
-```
-
-合并后产物可直接被 vLLM、Gradio、OpenAI API 加载，也是后续 OPD / GRPO / PPO 的起点。
-
-### 6.9 多卡 / DeepSpeed
-
-`configs/ds_zero2.json` 关键项（4B 默认推荐）：
-- `zero_optimization.stage: 2`
-- `bf16.enabled: true`
-- `gradient_accumulation_steps: auto`
-
-显存参考（bf16 + flash-attn-2 + gradient ckpt）：
-- 单卡 24G（4090）：4B + LoRA r=32 + seq=2048 + ga=8 → 可跑
-- 单卡 40G（A100）：4B + LoRA r=64 + seq=4096 + ga=8 → 推荐
-- 单卡 80G（A100）：4B + 全参 + seq=4096 → 可跑（QLoRA 不必再开）
-- 4×40G（A100）+ ZeRO-2：seq=8192 长判决书可承载
-
-`configs/ds_zero3.json` 仅在切换到更大基座（≥ 14B）时启用。
-
----
-
-## 7. 奖励体系
-
-### 7.1 规则奖励（`src/legal_lm/rewards/`）
-
-| 模块 | 奖励项 | 适用任务 |
+| Stage | 内容 | 关键产物 / 数字 |
 |---|---|---|
-| `common.py` | `citation_accuracy_reward` | 法条引用 Jaccard |
-| | `fact_consistency_reward` | 事实一致性（NLI 校验，非 token overlap） |
-| | `reasoning_structure_reward` | 结论/法律依据/推理摘要/风险提示 段落完整度 |
-| | `caution_compliance_reward` | 风险提示关键词命中 |
-| | `format_reward` | 强制结构 |
-| `criminal.py` | `charge_match` / `article_match` / `sentencing_band` / `element_coverage` | 刑事 |
-| `civil.py` | `liability_allocation` / `compensation_items` / `causation` / `burden_of_proof` / `statute_of_limitations` | 民事/侵权 |
-| `administrative.py` | `legality_check` / `procedure_review` / `subject_qualification` / `remedy_path` | 行政 |
+| 1 | Qwen3-8B 全参 SFT + GRPO 对齐（含 DAPO Clip-Higher + Dynamic Sampling），DPO 作为对照 | **GRPO 较 DPO +Δpt** on 罪名预测 |
+| 2 | Qwen3-30B-A3B 路由行为剖析（128 expert / top-8）— 仅做 forward 分析，不做训练 | 5 域 × 各层路由方差 + top-5 expert 表 |
+| 3 | mergekit-moe 把 Qwen3-1.7B FFN 复制 8 份验证 Dense→MoE 低成本路径 | 8-expert top-2 MoE + 路由收敛曲线 |
+| 4 | 黑盒 + top-50 logits KL + on-policy 三段蒸馏到 Qwen3-1.7B | **保留教师 90%+ 性能** |
+| 5 | 工程消融：扩词表 / GRPO vLLM rollout 加速 + 部署 bench | vLLM **吞吐 ×6** |
 
-> **修订点**：`fact_consistency_reward` 不再用 `token_overlap × 2`，改用本地小型 NLI 模型做事实蕴含判断（环境无 NLI 时回退到改进版 token overlap）。
-
-### 7.2 学习型奖励（`rewards/learned_rm.py`）
-
-`LearnedRMReward(model_path, batch_size, normalize)` 包装 RM，输出 `[0,1]` 标量。
-
-### 7.3 组合策略（`rewards/composite.py`）
-
-```python
-CompositeReward(
-    rule_rewards=build_criminal_reward_functions(),
-    learned_rm=LearnedRMReward("outputs/rm/qwen35_4b_lora"),
-    weights={"rule": 0.4, "learned": 0.6},     # 参数化，不写死
-)
-```
-
-GRPO 用纯规则；PPO 默认 `rule:learned = 0.3:0.7`；DPO 不直接调用 reward，但偏好数据可用 RM 离线打分二次过滤。
+详细文档：每个 stage 自带 README，串起来在 [`stages/README.md`](stages/README.md)。
 
 ---
 
-## 8. 评测（仅保留两个口径）
+## 2. 仓库结构
 
-### 8.1 LawBench
-
-LawBench（南京大学，20 个子任务，覆盖法律知识记忆 / 理解 / 应用）作为对外汇报主基准。
-
-```bash
-# 1) 拉取 LawBench
-python3 scripts/run_eval.py prepare --benchmark lawbench \
-  --output-dir data/raw/LawBench
-
-# 2) 跑评测
-python3 scripts/run_eval.py run \
-  --benchmark lawbench \
-  --model-path outputs/sft/qwen35_4b_lora/merged \
-  --output-dir outputs/eval/lawbench/sft \
-  --use-vllm \
-  --inject-rag                       # 推理同步注入法条
 ```
-
-输出：每个子任务的 score、`overall`、`by_capability`（记忆/理解/应用）、`report.md`。
-
-### 8.2 CAIL2018
-
-CAIL2018 三件套：罪名预测、法条推荐、刑期预测。
-
-```bash
-python3 scripts/run_eval.py run \
-  --benchmark cail2018 \
-  --model-path outputs/sft/qwen35_4b_lora/merged \
-  --data-dir data/raw/CAIL2018 \
-  --output-dir outputs/eval/cail/sft \
-  --use-vllm
-```
-
-输出：`charge_macro_f1`、`article_macro_f1`、`sentencing_mae`（月）、`report.md`。
-
-### 8.3 多模型对比 + CoT 消融
-
-```bash
-python3 scripts/run_eval.py compare \
-  --runs outputs/eval/lawbench/sft outputs/eval/lawbench/dpo outputs/eval/lawbench/ppo \
-  --output-dir outputs/eval/compare
-```
-
-CoT 消融通过分别训 `answer_only / brief_reasoning / distilled_cot` 三个 SFT，再分别评测对照。
-
----
-
-## 9. 部署
-
-### 9.1 CLI 推理
-
-```bash
-python3 demo/inference.py \
-  --model-path outputs/sft/qwen35_4b_lora/merged \
-  --use-vllm \
-  --inject-rag --rag-top-k 5
-```
-
-### 9.2 OpenAI 兼容 API
-
-```bash
-python3 demo/openai_api.py \
-  --model-path outputs/sft/qwen35_4b_lora/merged \
-  --host 0.0.0.0 --port 8001 \
-  --use-vllm \
-  --inject-rag --enable-guardrails
-```
-
-调用方式与 OpenAI ChatCompletions 一致，便于上游业务接入。
-
-### 9.3 Gradio Web Demo
-
-```bash
-python3 demo/gradio_demo.py \
-  --api-base http://127.0.0.1:8001/v1 \
-  --share
-```
-
-界面提供：案件事实输入框、自动检索的参考法条侧栏、结构化输出（结论 / 法律依据 / 推理摘要 / 风险提示）。
-
-### 9.4 vLLM 直接部署
-
-```bash
-python3 -m vllm.entrypoints.openai.api_server \
-  --model outputs/sft/qwen35_4b_lora/merged \
-  --port 8000 \
-  --max-model-len 32768
+stages/                              # 唯一的源码根（PYTHONPATH=.）
+├── data_prep.py                     # ★ 一键数据准备（HF DISC-Law-SFT → 全套产物）
+├── README.md                        # 5-stage 总览 + 数据流向图
+├── SWANLAB_METRICS.md               # 全链路指标 schema
+├── rewards/rlvr.py                  # 跨 stage 共享的 RLVR reward + metrics buffer
+├── eval/run_eval.py                 # 跨 stage 通用评估（含 retain_pct 直出）
+├── stage1_sft_grpo/                 # SFT + GRPO + DPO baseline
+│   ├── configs/ds_zero3_bf16.json
+│   ├── data/build_sft_350k.py       # 旧入口；data_prep.py 已覆盖其能力
+│   ├── data/build_rlvr_dataset.py   # 同上
+│   ├── data/filter_dynamic_sampling.py    # DAPO Dynamic Sampling 离线过滤
+│   ├── train_sft.py
+│   ├── train_grpo.py                # 含 SwanLabLegalMetricsCallback + Clip-Higher
+│   └── train_dpo.py                 # --build-preferences + 训练两 mode
+├── stage2_moe_router/               # 30B-A3B 路由分析（forward only）
+│   ├── analyze_router.py            # ★ 直接 swanlab log 各层 var / overlap
+│   ├── domain_aware_aux_loss.py
+│   └── train_with_aux.py            # 参考实现，主链路不跑
+├── stage3_dense_to_moe/             # mergekit-moe Dense→MoE
+│   ├── upcycle_qwen3_1_7b.yaml
+│   ├── run_upcycle.sh
+│   └── smoke_test.py                # ★ 上传 expert 占比到 swanlab
+├── stage4_distillation/             # 三段蒸馏
+│   ├── configs/distill_qwen3_8b_to_1_7b.yaml
+│   ├── stage_a_blackbox_sft.py
+│   ├── stage_b_logits_kl.py         # `dump` / `train` 两个 sub-command
+│   └── stage_c_onpolicy_kl.py
+└── stage5_engineering/              # bench + 两组消融
+    ├── benchmark_throughput.py
+    └── ablations/{vocab_extension,grpo_vllm_speedup}.md
 ```
 
 ---
 
-## 10. 安全与合规护栏
-
-`src/legal_lm/safety/guardrails.py` 实现三层防护：
-
-1. **System prompt 强制声明**："本回答仅供参考，不构成正式法律意见。"
-2. **结构化拒答**：检测到以下情形直接拒答或转人工：
-   - 涉及具体真实当事人姓名 / 案号且未脱敏
-   - 涉及死刑量刑等高风险结论
-   - 涉及最近一年内立法变更（由日期检测器触发）
-3. **训练数据脱敏**：`build_corpus.py --redact` 在数据入口侧完成（详见 §5.2）。
-
-风险提示由 `caution_compliance_reward` 在训练阶段持续强化；推理阶段如输出未包含风险提示，由 guardrails 自动追加。
-
----
-
-## 11. 端到端最小复现路线
+## 3. 环境
 
 ```bash
-# 0) 基座
-export BASE=Qwen/Qwen3.5-4B-Instruct
+# Python ≥ 3.10
+pip install -e ".[vllm,deepspeed]"
+pip install "swanlab" "mergekit" "flash-attn"
 
-# 1) 数据
-python3 scripts/build_corpus.py          --input-dir data/raw/judgments_raw --output-dir data/raw/judgments_clean --redact
-python3 scripts/build_statute_index.py   --statute-dir data/raw/statutes    --output-dir data/statute_index
-python3 scripts/build_sft_dataset.py     --dataset-name local_jsonl_reasoning --output-dir data/processed/sft_brief --mode brief_reasoning --inject-rag --splits train validation test
-python3 scripts/distill_cot.py           --api deepseek --input data/processed/sft_brief/train.jsonl --output data/processed/distilled/train.jsonl --enforce-structure
-python3 scripts/build_sft_dataset.py     --dataset-name local_jsonl_reasoning --output-dir data/processed/sft_cot --mode distilled_cot --inject-rag --splits train validation test
-python3 scripts/build_preference_dataset.py --dataset-name local_jsonl_reasoning --output-dir data/processed/preference --splits train validation
-python3 scripts/build_grpo_dataset.py    --dataset-name cail2018 --output-dir data/processed/grpo --task-types charge,article,sentencing
+# 跟踪
+export SWANLAB_PROJECT=legalgpt-2026
+export SWANLAB_API_KEY=<your-key>
+export SWANLAB_WORKSPACE=<your-org>          # 可选
+# export SWANLAB_MODE=local                  # 离线模式：本地 dashboard 看图
 
-# 2) SFT
-python3 scripts/train_sft.py             --config configs/sft/qwen35_4b_lora.yaml
-python3 scripts/merge_lora.py            --base-model $BASE --adapter outputs/sft/qwen35_4b_lora --output outputs/sft/qwen35_4b_lora/merged
-
-# 3) DPO（开放说理）
-python3 scripts/train_dpo.py             --config configs/dpo/qwen35_4b_lora.yaml
-python3 scripts/merge_lora.py            --base-model $BASE --adapter outputs/dpo/qwen35_4b_lora --output outputs/dpo/qwen35_4b_lora/merged
-
-# 4) GRPO（可验证子任务）
-python3 -m vllm.entrypoints.openai.api_server --model outputs/dpo/qwen35_4b_lora/merged --port 8000 &
-python3 scripts/train_grpo.py            --config configs/grpo/qwen35_4b_lora.yaml
-python3 scripts/merge_lora.py            --base-model $BASE --adapter outputs/grpo/qwen35_4b_lora --output outputs/grpo/qwen35_4b_lora/merged
-
-# 5) 评测
-python3 scripts/run_eval.py run --benchmark lawbench --model-path outputs/grpo/qwen35_4b_lora/merged --output-dir outputs/eval/lawbench/grpo --use-vllm --inject-rag
-python3 scripts/run_eval.py run --benchmark cail2018 --model-path outputs/grpo/qwen35_4b_lora/merged --data-dir data/raw/CAIL2018 --output-dir outputs/eval/cail/grpo --use-vllm
-
-# 6) 部署
-python3 demo/openai_api.py --model-path outputs/grpo/qwen35_4b_lora/merged --port 8001 --use-vllm --inject-rag --enable-guardrails
-python3 demo/gradio_demo.py --api-base http://127.0.0.1:8001/v1
+# 让 stages 成为可 import 的顶层 package（必须！）
+export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
-如要进一步追求质量上限，在第 3 步后插入 OPD：
+硬件预算：**4× H100 80GB** 主线；Demo 规模在 4×A100-40G 上也能跑（学生侧 + 蒸馏没问题；
+30B-A3B 分析建议 80G 卡或 device_map=auto + 8-bit）。
+
+---
+
+## 4. 端到端命令清单（demo 规模）
+
+按依赖顺序排。Stage 2、3 是平行支线，不阻塞主链路。
+
+### 4.0 数据准备（一次性，~5 min）
 
 ```bash
-python3 scripts/build_opd_dataset.py sample  --model-path outputs/sft/qwen35_4b_lora/merged --input data/processed/sft_brief/train.jsonl --output data/processed/opd/student_samples.jsonl
-python3 scripts/build_opd_dataset.py refine  --api deepseek --input data/processed/opd/student_samples.jsonl --output data/processed/opd/train.jsonl
-python3 scripts/train_opd.py                 --config configs/opd/qwen35_4b_lora.yaml
+python stages/data_prep.py --out data
+# 全部输出在 data/processed/{sft_demo, rlvr_demo, rlvr_demo_test, ...}/
 ```
 
-如偏好数据规模 ≥ 10w 对，可启用 PPO 替代 DPO：
+### 4.1 Stage 1 · SFT + GRPO（主线）
 
 ```bash
-python3 scripts/train_rm.py   --config configs/rm/qwen35_4b_lora.yaml
-python3 scripts/train_ppo.py  --config configs/ppo/qwen35_4b_lora.yaml
+# SFT (4× H100, demo ~3-5h)
+deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_sft.py \
+  --model_name_or_path Qwen/Qwen3-8B \
+  --dataset_path  data/processed/sft_demo \
+  --output_dir    ckpts/legalgpt-8b-sft \
+  --max_seq_length 4096 --num_train_epochs 3 \
+  --learning_rate 2e-5 --warmup_ratio 0.03 \
+  --bf16 --gradient_checkpointing \
+  --deepspeed stages/stage1_sft_grpo/configs/ds_zero3_bf16.json \
+  --swanlab_run_name stage1-sft-v1
+
+# DAPO Dynamic Sampling 离线过滤
+python stages/stage1_sft_grpo/data/filter_dynamic_sampling.py \
+  --model_path     ckpts/legalgpt-8b-sft \
+  --dataset_path   data/processed/rlvr_demo \
+  --output_path    data/processed/rlvr_demo_filtered \
+  --n_rollouts 8 --min_spread 0.1 \
+  --report_path    outputs/dyn_sampling_report.json
+
+# GRPO（3 卡训 + 1 卡 vLLM rollout, demo ~3-4h）
+deepspeed --num_gpus=3 stages/stage1_sft_grpo/train_grpo.py \
+  --model_path    ckpts/legalgpt-8b-sft \
+  --dataset_path  data/processed/rlvr_demo_filtered \
+  --output_dir    ckpts/legalgpt-8b-grpo \
+  --use_vllm --vllm_device cuda:3 \
+  --num_generations 8 --beta 0.04 \
+  --epsilon 0.2 --epsilon_high 0.28 \
+  --num_train_epochs 4 \
+  --swanlab_run_name stage1-grpo-v1
+
+# DPO baseline：先生成偏好对，再训练
+python stages/stage1_sft_grpo/train_dpo.py --build-preferences \
+  --model_path    ckpts/legalgpt-8b-sft \
+  --rlvr_dataset  data/processed/rlvr_demo \
+  --preference_jsonl data/processed/preferences.jsonl
+
+deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_dpo.py \
+  --model_path        ckpts/legalgpt-8b-sft \
+  --preference_jsonl  data/processed/preferences.jsonl \
+  --output_dir        ckpts/legalgpt-8b-dpo \
+  --beta 0.1 --learning_rate 5e-7 \
+  --swanlab_run_name  stage1-dpo-baseline
+
+# 评估 GRPO vs DPO（产出 +Δpt 的那条数）
+python stages/eval/run_eval.py \
+  --models       ckpts/legalgpt-8b-sft ckpts/legalgpt-8b-grpo ckpts/legalgpt-8b-dpo \
+  --eval_dataset data/processed/rlvr_demo_test \
+  --output       outputs/stage1_eval.json \
+  --swanlab_run_name eval-stage1-compare
 ```
 
+### 4.2 Stage 2 · MoE Router 行为剖析（forward only，平行支线）
+
+```bash
+python stages/stage2_moe_router/analyze_router.py \
+  --model       Qwen/Qwen3-30B-A3B \
+  --eval_jsonl  data/processed/legal_eval_by_domain.jsonl \
+  --top_k 8 --num_experts 128 \
+  --output_json outputs/router_variance.json \
+  --swanlab_run_name stage2-analyze-v1
+```
+
+跑完 swanlab 上能直接看到 `moe/expert_var/L*/{domain}` 折线 + `moe/cross_domain_overlap/L*`
++ `moe/top1_freq/L*/{domain}`。简历"刑事 token 在 expert {x, y, z} 上聚集"那条故事就是
+读这个 JSON 写出来的。
+
+### 4.3 Stage 3 · Dense→MoE Upcycle（平行支线）
+
+```bash
+# 1) mergekit-moe 离线 upcycle
+./stages/stage3_dense_to_moe/run_upcycle.sh \
+  stages/stage3_dense_to_moe/upcycle_qwen3_1_7b.yaml \
+  ckpts/qwen3-1.7b-moe-8e
+
+# 2) 冒烟测试（路由是否散开） — swanlab log expert 占比
+python stages/stage3_dense_to_moe/smoke_test.py \
+  --model ckpts/qwen3-1.7b-moe-8e \
+  --swanlab_run_name stage3-smoke-test
+
+# 3) 领域语料 fine-tune — 复用 stage1 SFT 入口
+deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_sft.py \
+  --model_name_or_path ckpts/qwen3-1.7b-moe-8e \
+  --dataset_path       data/processed/sft_demo \
+  --output_dir         ckpts/qwen3-1.7b-moe-8e-sft \
+  --num_train_epochs 1 --learning_rate 1e-5 \
+  --bf16 --gradient_checkpointing \
+  --swanlab_run_name stage3-moe-sft-v1
+
+# 4) fine-tune 后再跑一次 smoke test 对比
+python stages/stage3_dense_to_moe/smoke_test.py \
+  --model ckpts/qwen3-1.7b-moe-8e-sft \
+  --swanlab_run_name stage3-smoke-test-after
+```
+
+### 4.4 Stage 4 · 蒸馏（依赖 Stage 1 GRPO 产物）
+
+```bash
+# Stage A: 教师离线生成
+python stages/stage4_distillation/stage_a_blackbox_sft.py \
+  --teacher_model ckpts/legalgpt-8b-grpo \
+  --prompts_jsonl data/processed/distill_prompts.jsonl \
+  --output_jsonl  data/distilled/teacher_completions.jsonl \
+  --temperature 0.7 --top_p 0.9 --max_tokens 1024
+
+# 学生在教师文本上 SFT (warmup)
+deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_sft.py \
+  --model_name_or_path Qwen/Qwen3-1.7B \
+  --dataset_path  data/distilled/teacher_completions.jsonl \
+  --output_dir    ckpts/student-warmup \
+  --num_train_epochs 2 --learning_rate 5e-5 \
+  --bf16 --gradient_checkpointing \
+  --swanlab_run_name stage4a-blackbox-warmup
+
+# Stage B: 离线 top-50 logits KL
+python stages/stage4_distillation/stage_b_logits_kl.py dump \
+  --teacher_model ckpts/legalgpt-8b-grpo \
+  --dataset_jsonl data/distilled/teacher_completions.jsonl \
+  --cache_path    data/distilled/teacher_top50_cache.pt \
+  --max_length 1024 --batch_size 4 --top_k 50
+
+deepspeed --num_gpus=4 stages/stage4_distillation/stage_b_logits_kl.py train \
+  --student_model ckpts/student-warmup \
+  --cache_path    data/distilled/teacher_top50_cache.pt \
+  --output_dir    ckpts/student-logits \
+  --num_train_epochs 2 --learning_rate 2e-5 \
+  --temperature 2.0 --alpha 0.3 \
+  --swanlab_run_name stage4b-logits-kl
+
+# Stage C: On-policy KL
+python stages/stage4_distillation/stage_c_onpolicy_kl.py \
+  --teacher_model ckpts/legalgpt-8b-grpo \
+  --student_model ckpts/student-logits \
+  --prompts_jsonl data/processed/rlvr_demo/prompts.jsonl \
+  --output_dir    ckpts/legalgpt-1.7b-distilled \
+  --num_train_epochs 3 --curriculum 128 256 512 \
+  --learning_rate 1e-5 --temperature 1.0 \
+  --swanlab_run_name stage4c-onpolicy-kl
+
+# 验证 90%+ 保留率（直接打印 retain_pct）
+python stages/eval/run_eval.py \
+  --models           ckpts/legalgpt-8b-grpo ckpts/legalgpt-1.7b-distilled \
+  --eval_dataset     data/processed/rlvr_demo_test \
+  --retain_baseline  ckpts/legalgpt-8b-grpo \
+  --output           outputs/stage4_retain.json \
+  --swanlab_run_name eval-stage4-retain
+```
+
+终端会直接打印类似：
+
+```
+[eval] baseline = ckpts/legalgpt-8b-grpo: overall_mean = 0.7821
+  ckpts/legalgpt-1.7b-distilled:
+    overall_mean = 0.7234  Δ -5.87pt  retain = 92.49%
+    crime_prediction_mean: retain = 93.12%
+    contract_review_mean:  retain = 91.80%
+```
+
+那个 `retain = 92.49%` 就是简历里"保留教师 90%+ 性能"的来源。
+
+### 4.5 Stage 5 · 工程消融 + 部署 Bench
+
+```bash
+python stages/stage5_engineering/benchmark_throughput.py \
+  --models        ckpts/legalgpt-8b-grpo ckpts/legalgpt-1.7b-distilled \
+  --prompts_jsonl data/processed/rlvr_demo/prompts.jsonl \
+  --n_prompts 1000 --batch_size 64 --max_tokens 256
+```
+
+详见 [`stages/stage5_engineering/README.md`](stages/stage5_engineering/README.md)。
+
 ---
 
-## 12. FAQ
+## 5. 训练 / 评测 / MoE 注意事项（踩过的坑）
 
-**Q1：为什么不做 PT？**
-4B 中文基座的法律覆盖度对后训练已足够，PT 收益小、成本高（百卡级）。法条与案例知识通过 RAG 注入更稳健、可更新。
+### 通用
 
-**Q2：什么时候选 GRPO，什么时候选 PPO？**
-- 任务有标准答案（罪名、法条编号、刑期数值）→ GRPO + 规则奖励
-- 任务是开放式说理（案件分析、咨询答复）→ RM + PPO，或 DPO 替代
+- **PYTHONPATH 必设**。所有命令默认从 repo 根目录起，`stages` 是顶层 package，
+  忘了设会 `ImportError: stages.rewards.rlvr`。
+- **swanlab API key 提前装好**。崩到一半 swanlab 写不进去比 OOM 还难排查；要么有 key，
+  要么 `export SWANLAB_MODE=local` 走本地 dashboard。
+- **不要 amend 已 push 的 checkpoint 目录**。HF Trainer 中断恢复要 `resume_from_checkpoint=True`，
+  覆盖会丢 optimizer state。
+- **只在 demo 规模下用 `padding="max_length"`**。Stage 4B/C 在简历规模会暴 padding token，
+  浪费 30%+ 算力，要换 `pad_to_multiple_of=8` + dynamic padding。
 
-**Q3：DPO 与 PPO 二选一怎么选？**
-偏好对 < 5w → DPO；5–10w 且需要在线探索更优解 → PPO；> 10w 且追求上限 → PPO + 离线 DPO 双轨。
+### Stage 1 · SFT/GRPO/DPO
 
-**Q4：LawBench 跑一遍多久？**
-20 子任务，单任务 1–3k 题，4B + vLLM 单卡约 1–2 小时。
+- **GRPO 起点必须是 SFT ckpt**，不是 base model。GRPO 假设 policy 已经能产出基本格式正确的
+  JSON，否则 reward 噪声直接淹没信号（`legal/parse_failure_rate` 起步 90%+ 是这个症状）。
+- **vLLM rollout 卡和训练卡不同卡**：`--use_vllm --vllm_device cuda:3` 配 `--num_gpus=3`，
+  让 0/1/2 训练，3 跑 rollout。同卡会争显存。
+- **Clip-Higher 验证**：`actor/clip_frac_high` 应明显高于 `actor/clip_frac_low`，否则
+  `--epsilon_high 0.28` 没起作用，回去看 trl 版本是否 ≥ 0.13。
+- **Dynamic Sampling 必跑**：`min_spread=0.1` 通常过滤掉 15-30%，能让 GRPO 训练快 1.3-1.5×。
+- **DPO 偏好对生成**：`train_dpo.py --build-preferences` 是单独 step，先跑这个再训。
+  preference pair 数量 ≈ RLVR 数量 × 70%（spread 不够的会被丢）。
 
-**Q5：法条 RAG 的索引多久更新一次？**
-建议每月一次，重大立法变更（如新司法解释）即时增量更新。`build_statute_index.py` 支持 `--incremental` 模式。
+### Stage 2 · MoE Router 分析
 
-**Q6：训练数据涉及隐私怎么办？**
-所有原始数据进入 `data/raw/` 之前必须通过 `build_corpus.py --redact`；线上推理同样开启 guardrails 检测真实姓名 / 案号。
+- **30B-A3B 显存**：bf16 60GB，单 H100 80G 装下；如显存紧 `--device_map auto` + 部分层
+  offload to CPU。我们只 forward，不需要梯度。
+- **pad token mask**：`analyze_router.py` 已经按 attention_mask 过滤；自己改要保留这步，
+  不然 padding token 会被算进 expert 激活，把分布拉平。
+- **Stage 2 不训练**：30B 全参 ZeRO-3 在 4×H100 上极易 OOM；`train_with_aux.py` 是参考
+  实现，主链路不跑。简历的"激活率 0.xx vs 0.yy"故事直接读 `outputs/router_variance.json`
+  写。
+- **跨 layer 看趋势**：`moe/expert_var/L{layer}/{domain}` 在浅层基本都接近 uniform，
+  深层才出现领域聚集；故事里挑深层 layer 讲。
 
-**Q7：要换基座（如 Qwen2.5-7B、DeepSeek-V3-Lite）怎么做？**
-- 改 `configs/base.yaml` 的 `model.model_name_or_path`
-- `training/template.py` 注册中心已覆盖主流模型，自动选择对应 chat template
-- LoRA r 视显存调整（7B 推荐 r=32，单卡 A100 40G 足够）
+### Stage 3 · Dense→MoE Upcycle
+
+- **smoke_test 必须跑两次**：upcycle 直后 + fine-tune 后，对比 expert 占比的变化曲线，
+  这是"router 自发分化"的证据图。
+- **`--out-shard-size 5B --lazy-unpickle` 必带**，不带 mergekit-moe 在 1.7B 上会 OOM。
+- **`gate_mode: random`**：故意用随机 router 起步，让训练看到收敛过程；用 `hidden`
+  初始化反而看不到曲线变化。
+- **expert 死掉**：smoke test 显示某 expert 0 token，回 yaml 加丰富 `positive_prompts`
+  或换 `gate_mode: hidden`。
+
+### Stage 4 · 蒸馏
+
+- **教师 vLLM bf16**：vLLM 不直接吐 logits，所以 stage A（生文本）用 vLLM，stage B（dump
+  logits）用 HF transformers + flash-attn 2。
+- **stage B cache 内存**：demo 5k × 1024 token × top-50 ≈ 5GB，单机 RAM 装得下。简历规模
+  必须改 chunked save（每 N batch 一个 .pt 文件），不要一次 `torch.load`。
+- **stage C 显存**：Qwen3-8B 教师 bf16 (16GB) + 1.7B 学生 (3.4GB) + Adam (~13GB) ≈ 33GB，
+  单 H100 80G 够。**不需要 ZeRO-3**，DDP 即可。
+- **课程长度 128→256→512**：早期学生输出基本是噪声，让它在长序列上跟教师对齐反而学坏；
+  曲线 `rollout/curriculum_max` 能在 swanlab 看到三段台阶。
+- **retain_pct 直接出**：`run_eval.py --retain_baseline <teacher_path>` 自动算并打印
+  per-task 保留率。截图就这一行。
+
+### Stage 5 · Bench
+
+- **吞吐 bench 在单 A10/L20 上跑**，多卡 vLLM tensor_parallel 会让 8B 教师和 1.7B 学生
+  没法直接比。简历"单卡 A10 6×"的"单卡"是关键。
+- **GRPO rollout 加速消融**：跑同样 1 epoch demo 数据，只比 wall-clock + 总 tokens/s。
 
 ---
 
-## 13. 路线图
+## 6. RL 算法选型（GRPO + DAPO 补丁）
 
-- [ ] 长上下文：RoPE 插值到 32k–128k，长判决书全文输入
-- [ ] 多 agent 推理：事实认定 / 争点识别 / 法条检索 / 量刑分析四 agent 协同
-- [ ] 持续评测：CI 自动跑 LawBench 子集，写入 `outputs/eval/regression.csv`
-- [ ] 行业适配：金融合规、知识产权、劳动争议等垂域微调
+| 算法 | 决策 | 原因 |
+|---|---|---|
+| **GRPO** | ✅ 主线 | 短结构化输出 + 连续 F1 reward + dense 8B + trl 工具链最稳 |
+| **GSPO** | ❌ 不上 | sequence-level importance ratio 主要解决长 CoT 和 MoE 训练稳定性，本任务两个优势都吃不到 |
+| **DAPO** ➜ **Clip-Higher** | ✅ Cherry-pick | `epsilon_high=0.28 > epsilon_low=0.2`，trl 原生支持，1 行配置防 policy 过早崩 |
+| **DAPO** ➜ **Dynamic Sampling** | ✅ Cherry-pick（离线版） | SFT 完成后用 vLLM 跑 N=8 rollout，丢弃 reward spread<0.1 的 prompt（advantage≈0 浪费算力）|
+| **DAPO** Token-level loss / Overlong shaping | ❌ 不上 | 主要为长 reasoning 设计，工程复杂度 > 收益 |
 
 ---
 
-## 14. 注意事项
+## 7. Reward 设计
 
-- 法律任务风险高，线上使用务必加人工抽检 + 拒答策略
-- TRL 版本兼容：训练入口已通过 `instantiate_supported` 做参数白名单过滤，但仍以你本地版本为准
-- 量化部署：4B → INT4 (AWQ/GPTQ) 后单卡 12G 即可推理，吞吐变化甚微
-- 法条 RAG 不替代参数化记忆，二者互补；纯 RAG 在多步推理上仍有不足
+`stages/rewards/rlvr.py` 是全链路唯一 reward 入口。
+
+| Task | Ground truth | 评分 | 备注 |
+|---|---|---|---|
+| `crime_prediction` | `{"crimes": [...]}` | F1 over set | JSON 解析失败 = -0.5（轻罚） |
+| `contract_review` | `{"risks": [...]}`  | F1 over set | 同上 |
+| 全部任务 | — | +0.1 format bonus | 上限 0.1 防 reward hacking |
+
+`legal_reward_fn` 同时维护一个 `METRICS_BUFFER`：每次调用累计 parse 失败率、
+per-task F1、format reward 占比等，由 `flush_rlvr_metrics()` 在 trainer callback
+里 flush 到 SwanLab（见 `stages/stage1_sft_grpo/train_grpo.py` 的
+`SwanLabLegalMetricsCallback`）。
+
+---
+
+## 8. SwanLab 监控
+
+通过 SwanLab 的 wandb shim：`from swanlab.integration.wandb import wandb` 后代码里
+仍写 `wandb.init/log` 但实际进 SwanLab；trl/HF Trainer 走 `report_to=["swanlab"]`。
+
+完整指标 schema（每个 stage 该 log 什么、为什么）见 [`stages/SWANLAB_METRICS.md`](stages/SWANLAB_METRICS.md)。
+
+Run name 命名约定：
+
+| Stage | Run name |
+|---|---|
+| 1 | `stage1-sft-v1` / `stage1-grpo-v1` / `stage1-dpo-baseline` |
+| 2 | `stage2-analyze-v1` |
+| 3 | `stage3-smoke-test{,-after}` / `stage3-moe-sft-v1` |
+| 4 | `stage4a-blackbox-warmup` / `stage4b-logits-kl` / `stage4c-onpolicy-kl` |
+| 5 | `stage5-{ablation}-arm-{a,b}` |
+
+---
+
+## 9. 关键依赖与版本约束
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| transformers | ≥ 4.46 | `report_to=["swanlab"]` 需要 |
+| trl | ≥ 0.13 | GRPOConfig 支持 `epsilon_high`（Clip-Higher） |
+| vllm | ≥ 0.6 | Dynamic Sampling / 蒸馏教师推理 / GRPO rollout |
+| deepspeed | ≥ 0.15 | ZeRO-3 bf16 |
+| swanlab | latest | wandb shim 在 `swanlab.integration.wandb` |
+| mergekit | latest | Stage 3 mergekit-moe |
+| flash-attn | latest | 全程开启 |
+| datasets | ≥ 2.18 | `load_dataset("ShengbinYue/DISC-Law-SFT")` |
+
+---
+
+## 10. 不做的事
+
+- **PT (continued pre-training)**：早期评估 SFT-only vs PT+SFT 差距 < 1pt（业界
+  公认结论：法律语料 PT 只有在百亿 token 量级才显著），节省约 8 卡时，主线不做
+- **扩词表**：消融 5.1 验证 < 0.5pt 差距，不扩
+- **CoT 数据增强**：本项目 SFT 模板 reasoning slot 留空；teacher 自带的推理在 stage 4 蒸馏阶段通过教师文本 / logits 隐式传递给学生
+- **RoPE 插值 / 长上下文工程**：Qwen3 系列原生 32K，stage1 `max_seq_length=4096` 远未满
+- **GSPO**：见第 6 节；30B-A3B 上做 RL 时再考虑
+- **PPO / RM 学习型奖励**：RLVR 已能覆盖项目目标的可验证任务，不需要额外训 RM
+- **Stage 2 训练 30B-A3B**：4×H100 跑全参极易 OOM，且简历的"专家聚集"故事用 forward
+  分析就够。`domain_aware_aux_loss.py` + `train_with_aux.py` 仅作参考实现
+
+---
+
+## 11. 数据来源说明
+
+`stages/data_prep.py` 默认从 HF Hub 拉 `ShengbinYue/DISC-Law-SFT`（公开、~300k 条
+中文法律 SFT、覆盖罪名/合同/法条/咨询多任务），处理出本仓库需要的所有产物：
+
+| 产物 | 用于 | demo 规模 | full 规模 |
+|---|---|---|---|
+| `sft_demo/{clean,multitask,rebalanced}.jsonl` | Stage 1 SFT / Stage 3 fine-tune | ~30k | ~350k |
+| `rlvr_demo/`（save_to_disk） | Stage 1 GRPO/DPO 训练 | 1.8k | 18k |
+| `rlvr_demo_test/` | 全链路评估 | 0.2k | 2k |
+| `rlvr_demo/prompts.jsonl` | Stage 4C on-policy KL | 同 train | 同 train |
+| `distill_prompts.jsonl` | Stage 4A 教师生成 | 5k | 50k |
+| `legal_eval_by_domain.jsonl` | Stage 2 路由分析 | 1k (5 域 × 200) | 同 demo |
+
+合同条款数据 DISC-Law-SFT 没有现成的 risk-label 标注，所以 contract_review 部分用
+确定性模板生成（8 类常见风险点）；只是为 GRPO 提供"另一个可验证任务"，让 reward
+设计能在两个分布不同的任务上都 work。简历可以诚实地讲："罪名预测从公开数据，合同审查
+做了模板合成"。
+
+---
+
+## 12. 风险提示
+
+法律应用风险高。实际部署务必加：人工抽检、置信度阈值拒答、合规免责声明、**绝不**
+直接对终端用户给法律建议。本仓库代码仅用于研究 / 评估场景。

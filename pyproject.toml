@@ -10,14 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate",
-  "datasets",
+  "datasets>=2.18",
   "jieba",
   "peft",
   "pyyaml",
   "scikit-learn",
-  "torch",
-  "transformers",
-  "trl",
+  "torch>=2.4",
+  "transformers>=4.46",
+  "trl>=0.13",
   "openai>=1.30",
   "loguru",
   "huggingface_hub",
@@ -29,7 +29,7 @@ dev = [
   "ruff",
 ]
 vllm = [
-  "vllm",
+  "vllm>=0.6",
 ]
 rag = [
   "faiss-cpu",
@@ -42,14 +42,18 @@ serve = [
   "httpx",
 ]
 deepspeed = [
-  "deepspeed",
+  "deepspeed>=0.15",
+]
+tracking = [
+  "swanlab",
+]
+moe = [
+  "mergekit",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["stages*"]
 
 [tool.ruff]
 line-length = 100

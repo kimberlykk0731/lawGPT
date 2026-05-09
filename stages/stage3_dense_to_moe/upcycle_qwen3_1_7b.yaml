@@ -1,0 +1,25 @@
+# mergekit-moe upcycle config: Qwen3-1.7B Dense → 8-expert MoE (top-2)
+#
+# 8 个 expert 用同一份 1.7B FFN 复制，positive_prompts 给路由初始化语义偏好。
+# 训练前 router 是随机的（gate_mode: random）—— 后续在领域语料上几千步即可收敛。
+base_model: Qwen/Qwen3-1.7B
+gate_mode: random
+dtype: bfloat16
+experts_per_token: 2
+experts:
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["合同", "条款"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["罪名", "刑法"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["民事", "侵权"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["行政", "复议"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["商事", "公司"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["知产", "专利"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["证据", "程序"]
+  - source_model: Qwen/Qwen3-1.7B
+    positive_prompts: ["执行", "强制"]
