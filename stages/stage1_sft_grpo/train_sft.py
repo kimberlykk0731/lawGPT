@@ -41,6 +41,8 @@ def _load_dataset(path: Path) -> Dataset:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Injected by deepspeed launcher; not user-set.")
     parser.add_argument("--model_name_or_path", default="Qwen/Qwen3-8B")
     parser.add_argument("--dataset_path", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)

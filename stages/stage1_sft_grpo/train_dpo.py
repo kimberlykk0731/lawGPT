@@ -68,6 +68,8 @@ def build_preference_pairs(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Injected by deepspeed launcher; not user-set.")
     parser.add_argument("--build-preferences", dest="build_preferences", action="store_true",
                         help="Pre-step: sample N completions per RLVR prompt and emit "
                              "a (chosen, rejected) preference JSONL. Then exit.")

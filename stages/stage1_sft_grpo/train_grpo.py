@@ -37,6 +37,8 @@ class SwanLabLegalMetricsCallback(TrainerCallback):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Injected by deepspeed launcher; not user-set.")
     parser.add_argument("--model_path", default="ckpts/legalgpt-8b-sft",
                         help="Must be the SFT checkpoint, not the base model")
     parser.add_argument("--dataset_path", type=Path, required=True,

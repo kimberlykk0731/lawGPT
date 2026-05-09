@@ -219,6 +219,8 @@ def main() -> None:
     p_dump.add_argument("--top_k", type=int, default=50)
 
     p_train = sub.add_parser("train", help="Train student with cached KL targets")
+    p_train.add_argument("--local_rank", type=int, default=-1,
+                         help="Injected by deepspeed launcher; not user-set.")
     p_train.add_argument("--student_model", default="ckpts/student-warmup")
     p_train.add_argument("--cache_path", type=Path, required=True)
     p_train.add_argument("--output_dir", type=Path, required=True)

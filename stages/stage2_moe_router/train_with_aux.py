@@ -93,6 +93,8 @@ class DomainAuxTrainer(Trainer):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Injected by deepspeed launcher; not user-set.")
     parser.add_argument("--model_name_or_path", default="Qwen/Qwen3-30B-A3B")
     parser.add_argument("--dataset_jsonl", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
