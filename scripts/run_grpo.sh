@@ -90,15 +90,23 @@ trap '
   pkill -9 -f "trl vllm-serve" 2>/dev/null || true
 ' EXIT
 
-# Wait for /health to come up
+# Wait for /health to come up. trl vllm-serve has a known mode where the
+# worker engine dies (e.g. KV cache OOM) but the uvicorn parent stays alive,
+# so we *also* tail the log for fatal patterns rather than just polling /health.
 echo -n "[run_grpo] waiting for vllm-serve /health ..."
+FATAL_PATTERNS='Engine core initialization failed|RuntimeError: Engine core|ValueError: No available memory|CUDA out of memory|RuntimeError: CUDA error|RuntimeError: Failed to'
 for i in $(seq 1 120); do
   if curl -fs --max-time 2 "http://127.0.0.1:$VLLM_PORT/health/" > /dev/null 2>&1; then
-    echo " up after ${i}s"; break
+    echo " up after $((i*5))s"; break
   fi
   if ! kill -0 "$SERVE_PID" 2>/dev/null; then
     echo " FAILED — vllm-serve died early. tail:"
     tail -40 "$SERVE_LOG" >&2
+    exit 1
+  fi
+  if grep -E -q "$FATAL_PATTERNS" "$SERVE_LOG" 2>/dev/null; then
+    echo " FAILED — engine crash detected in log. tail:"
+    grep -E -A2 "$FATAL_PATTERNS" "$SERVE_LOG" | tail -25 >&2
     exit 1
   fi
   sleep 5
