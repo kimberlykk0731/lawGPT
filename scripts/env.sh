@@ -51,6 +51,11 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
 
+# ZeRO-3 + GRPO sees memory fragmentation late in training (PyTorch's own
+# advice on the OOM trace). expandable_segments=True turns on a chunked
+# allocator that releases gaps back to the pool.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # pip mirrors
 export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 export PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
