@@ -29,12 +29,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 ## 1. 数据准备
 
-数据全套已经由顶层 `stages/data_prep.py` 一键产出。如果只想看老入口（手工方式）：
-
-- `data/build_sft_350k.py` — 旧 SFT 入口，单独使用需要 `--cail-raw` + `--external-instruction-jsonl`
-- `data/build_rlvr_dataset.py` — 旧 RLVR 入口，需要预先准备 `clean_cail.jsonl` + `contract_clauses.jsonl`
-
-主链路推荐直接用 `data_prep.py`。
+数据全套由顶层 `stages/data_prep.py` 一键产出（HF DISC-Law-SFT → SFT/RLVR/distill 全部产物）。
 
 ```bash
 # Dynamic Sampling 离线过滤（在 SFT 完成后跑，预算 ~2-3 GPU·h）

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 from pathlib import Path
 
 from datasets import Dataset, load_from_disk
@@ -75,7 +74,7 @@ def main() -> None:
                              "a (chosen, rejected) preference JSONL. Then exit.")
     parser.add_argument("--rlvr_dataset", type=Path, default=None,
                         help="Required when --build-preferences is set; output of "
-                             "build_rlvr_dataset.py / data_prep.py.")
+                             "stages/data_prep.py (rlvr_demo).")
     parser.add_argument("--n_per_prompt", type=int, default=4,
                         help="--build-preferences only: rollouts per prompt for ranking.")
     parser.add_argument("--model_path", default="ckpts/legalgpt-8b-sft")
@@ -86,6 +85,8 @@ def main() -> None:
     parser.add_argument("--learning_rate", type=float, default=5e-7)
     parser.add_argument("--num_train_epochs", type=float, default=3)
     parser.add_argument("--deepspeed", default="stages/stage1_sft_grpo/configs/ds_zero3_bf16.json")
+    parser.add_argument("--resume_from_checkpoint", default=None,
+                        help='Checkpoint dir or "auto" to pick latest under --output_dir.')
     parser.add_argument("--swanlab_project", default="legalgpt-2026")
     parser.add_argument("--swanlab_run_name", default="stage1-dpo-baseline")
     args = parser.parse_args()
@@ -139,7 +140,10 @@ def main() -> None:
         train_dataset=dataset,
         processing_class=tokenizer,
     )
-    trainer.train()
+    resume = args.resume_from_checkpoint
+    if resume == "auto":
+        resume = True
+    trainer.train(resume_from_checkpoint=resume)
     trainer.save_model(str(args.output_dir))
 
 

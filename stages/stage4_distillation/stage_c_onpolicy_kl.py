@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
@@ -57,7 +56,7 @@ def curriculum_max_new_tokens(epoch: int, schedule: list[int]) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--teacher_model", default="ckpts/legalgpt-8b-grpo")
-    parser.add_argument("--student_model", default="ckpts/student-stage1-warmup")
+    parser.add_argument("--student_model", default="ckpts/student-logits")
     parser.add_argument("--prompts_jsonl", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--num_train_epochs", type=int, default=3)

@@ -5,22 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "legal-lm-cn"
 version = "0.1.0"
-description = "Chinese legal post-training pipeline for SFT, DPO/ORPO, and GRPO."
+description = "Chinese legal post-training pipeline: SFT + GRPO/DPO + MoE analysis + distillation."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate",
   "datasets>=2.18",
-  "jieba",
-  "peft",
-  "pyyaml",
-  "scikit-learn",
+  "huggingface_hub",
   "torch>=2.4",
   "transformers>=4.46",
-  "trl>=0.13",
-  "openai>=1.30",
-  "loguru",
-  "huggingface_hub",
+  # trl 0.15+ removed GRPOConfig.vllm_device (switched to server-mode vLLM).
+  # Our train_grpo.py uses the colocate-mode API; pin to <0.15 until we migrate.
+  "trl>=0.13,<0.15",
 ]
 
 [project.optional-dependencies]
@@ -29,26 +25,12 @@ dev = [
   "ruff",
 ]
 vllm = [
-  "vllm>=0.6",
-]
-rag = [
-  "faiss-cpu",
-  "sentence-transformers",
-]
-serve = [
-  "fastapi",
-  "uvicorn",
-  "gradio>=4.0",
-  "httpx",
+  # vllm < 0.7 lacks vllm.sampling_params.GuidedDecodingParams which
+  # trl >= 0.13's GRPOTrainer imports unconditionally.
+  "vllm>=0.7,<0.8",
 ]
 deepspeed = [
   "deepspeed>=0.15",
-]
-tracking = [
-  "swanlab",
-]
-moe = [
-  "mergekit",
 ]
 
 [tool.setuptools.packages.find]

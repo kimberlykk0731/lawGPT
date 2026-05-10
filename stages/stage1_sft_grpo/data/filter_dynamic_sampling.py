@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument("--model_path", default="ckpts/legalgpt-8b-sft",
                         help="Initial policy used to estimate per-prompt reward spread")
     parser.add_argument("--dataset_path", type=Path, required=True,
-                        help="Output of build_rlvr_dataset.py")
+                        help="Output of stages/data_prep.py (rlvr_demo)")
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--n_rollouts", type=int, default=8,
                         help="Should match GRPOConfig.num_generations")

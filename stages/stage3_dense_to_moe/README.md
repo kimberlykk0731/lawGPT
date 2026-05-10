@@ -24,13 +24,12 @@ python stages/stage3_dense_to_moe/smoke_test.py \
 
 ## 3. 领域语料 fine-tune
 
-复用 stage1 的 SFT 入口（注意 dataset 用清洗后 CAIL + 多任务合成的子集即可，
-不需要 350k 全量；目的是 router 收敛）：
+复用 stage1 的 SFT 入口（demo 规模 sft_demo 子集即可，目的是让 router 收敛）：
 
 ```bash
 deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_sft.py \
   --model_name_or_path ckpts/qwen3-1.7b-moe-8e \
-  --dataset_path       data/processed/sft_350k \
+  --dataset_path       data/processed/sft_demo \
   --output_dir         ckpts/qwen3-1.7b-moe-8e-sft \
   --max_seq_length 4096 \
   --num_train_epochs 1 \

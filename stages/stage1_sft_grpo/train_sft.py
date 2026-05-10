@@ -1,8 +1,8 @@
-"""Qwen3-8B full-parameter SFT on the 350k legal corpus.
+"""Qwen3-8B full-parameter SFT on the legal corpus.
 
 deepspeed --num_gpus=4 stages/stage1_sft_grpo/train_sft.py \
     --model_name_or_path Qwen/Qwen3-8B \
-    --dataset_path data/processed/sft_350k \
+    --dataset_path data/processed/sft_demo \
     --output_dir ckpts/legalgpt-8b-sft \
     --max_seq_length 4096 \
     --num_train_epochs 3 \
@@ -57,7 +57,16 @@ def main() -> None:
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--deepspeed", default=None)
     parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--save_strategy", default="epoch")
+    parser.add_argument("--save_strategy", default="steps",
+                        help="'steps' (default) saves every --save_steps; 'epoch' saves "
+                             "at epoch boundaries only (bad for crash recovery).")
+    parser.add_argument("--save_steps", type=int, default=200)
+    parser.add_argument("--save_total_limit", type=int, default=3)
+    parser.add_argument("--resume_from_checkpoint", default=None,
+                        help='Path to a checkpoint dir, or "auto" to pick the latest under '
+                             '--output_dir. Omit for fresh run.')
+    parser.add_argument("--overwrite_output_dir", action="store_true",
+                        help="Discard stale ckpts in --output_dir if not resuming.")
     parser.add_argument("--swanlab_project", default="legalgpt-2026")
     parser.add_argument("--swanlab_run_name", default="stage1-sft-v1")
     args = parser.parse_args()
@@ -85,6 +94,9 @@ def main() -> None:
         deepspeed=args.deepspeed,
         logging_steps=args.logging_steps,
         save_strategy=args.save_strategy,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        overwrite_output_dir=args.overwrite_output_dir,
         report_to=["swanlab"],
         run_name=args.swanlab_run_name,
     )
@@ -95,7 +107,10 @@ def main() -> None:
         train_dataset=dataset,
         processing_class=tokenizer,
     )
-    trainer.train()
+    resume = args.resume_from_checkpoint
+    if resume == "auto":
+        resume = True   # HF Trainer interprets True as "find latest in output_dir"
+    trainer.train(resume_from_checkpoint=resume)
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(str(args.output_dir))
 

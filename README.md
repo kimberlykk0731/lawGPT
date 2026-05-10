@@ -54,8 +54,6 @@ stages/                              # 唯一的源码根（PYTHONPATH=.）
 ├── eval/run_eval.py                 # 跨 stage 通用评估（含 retain_pct 直出）
 ├── stage1_sft_grpo/                 # SFT + GRPO + DPO baseline
 │   ├── configs/ds_zero3_bf16.json
-│   ├── data/build_sft_350k.py       # 旧入口；data_prep.py 已覆盖其能力
-│   ├── data/build_rlvr_dataset.py   # 同上
 │   ├── data/filter_dynamic_sampling.py    # DAPO Dynamic Sampling 离线过滤
 │   ├── train_sft.py
 │   ├── train_grpo.py                # 含 SwanLabLegalMetricsCallback + Clip-Higher
@@ -69,7 +67,6 @@ stages/                              # 唯一的源码根（PYTHONPATH=.）
 │   ├── run_upcycle.sh
 │   └── smoke_test.py                # ★ 上传 expert 占比到 swanlab
 ├── stage4_distillation/             # 三段蒸馏
-│   ├── configs/distill_qwen3_8b_to_1_7b.yaml
 │   ├── stage_a_blackbox_sft.py
 │   ├── stage_b_logits_kl.py         # `dump` / `train` 两个 sub-command
 │   └── stage_c_onpolicy_kl.py
@@ -409,8 +406,8 @@ Run name 命名约定：
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | transformers | ≥ 4.46 | `report_to=["swanlab"]` 需要 |
-| trl | ≥ 0.13 | GRPOConfig 支持 `epsilon_high`（Clip-Higher） |
-| vllm | ≥ 0.6 | Dynamic Sampling / 蒸馏教师推理 / GRPO rollout |
+| trl | ≥ 0.13, < 0.15 | GRPOConfig 支持 `epsilon_high`（Clip-Higher）；0.15+ 砍掉 `vllm_device`（改 server-mode），暂未迁移 |
+| vllm | ≥ 0.7 (< 0.8) | Dynamic Sampling / 蒸馏教师推理 / GRPO rollout；trl 0.13 的 GRPOTrainer 依赖 `vllm.sampling_params.GuidedDecodingParams`（首发 v0.6.5+），实测 0.7.x 最稳 |
 | deepspeed | ≥ 0.15 | ZeRO-3 bf16 |
 | swanlab | latest | wandb shim 在 `swanlab.integration.wandb` |
 | mergekit | latest | Stage 3 mergekit-moe |
