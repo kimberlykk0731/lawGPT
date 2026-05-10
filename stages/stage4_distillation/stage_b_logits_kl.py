@@ -202,7 +202,10 @@ def train_student_kl(args: argparse.Namespace) -> None:
         temperature=args.temperature,
         alpha=args.alpha,
     )
-    trainer.train()
+    resume = getattr(args, "resume_from_checkpoint", None)
+    if resume == "auto":
+        resume = True
+    trainer.train(resume_from_checkpoint=resume)
     trainer.save_model(str(args.output_dir))
 
 
@@ -231,6 +234,8 @@ def main() -> None:
     p_train.add_argument("--temperature", type=float, default=2.0)
     p_train.add_argument("--alpha", type=float, default=0.3)
     p_train.add_argument("--logging_steps", type=int, default=10)
+    p_train.add_argument("--resume_from_checkpoint", default=None,
+                         help='Checkpoint dir or "auto" to pick latest under --output_dir.')
     p_train.add_argument("--swanlab_project", default="legalgpt-2026")
     p_train.add_argument("--swanlab_run_name", default="stage4b-logits-kl")
 

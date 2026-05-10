@@ -8,12 +8,12 @@ only passes kwargs that the installed trl version actually supports. Logs
 which optional features are dropped so you can match your story to what
 actually trained.
 
-Known version dependencies:
+Known version dependencies (sweet spot is trl 0.16.x / 0.17.x):
 - trl ≥ 0.13: introduced GRPOConfig + GRPOTrainer
-- trl 0.13/0.14: vLLM via colocate-mode, supports `vllm_device`
+- trl 0.13/0.14/0.15: colocate-mode `vllm_device`; **no Clip-Higher yet**
 - trl 0.14+: `temperature` keyword
-- trl 0.15+: DAPO Clip-Higher (`epsilon`, `epsilon_high`); dropped `vllm_device`
-- trl 0.16+: vLLM via server-mode (run `trl vllm-serve` separately)
+- trl 0.16.x / 0.17.x: DAPO Clip-Higher (`epsilon`, `epsilon_high`) AND colocate-mode `vllm_device` — what we use
+- trl 0.18+: removed `vllm_device`; vLLM via server-mode (run `trl vllm-serve` separately)
 """
 
 from __future__ import annotations
@@ -73,12 +73,24 @@ def main() -> None:
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--deepspeed", default="stages/stage1_sft_grpo/configs/ds_zero3_bf16.json")
     parser.add_argument("--use_vllm", action="store_true", default=True)
-    parser.add_argument("--vllm_device", default="cuda:7",
-                        help="trl 0.13/0.14 only — ignored on trl 0.15+ (colocate).")
-    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.85)
-    parser.add_argument("--vllm_max_model_len", type=int, default=4096)
+    # Colocate-mode args (trl 0.13–0.15 only; ignored at runtime on 0.16+):
+    parser.add_argument("--vllm_device", default=None,
+                        help="Legacy trl 0.13–0.15 colocate-mode device; ignored on 0.16+.")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=None,
+                        help="Legacy colocate-mode arg; in server-mode pass it to `trl vllm-serve`.")
+    parser.add_argument("--vllm_max_model_len", type=int, default=None,
+                        help="Legacy colocate-mode arg; in server-mode pass it to `trl vllm-serve`.")
+    # Server-mode args (trl 0.16+ — what we actually use now):
+    parser.add_argument("--vllm_server_host", default="127.0.0.1",
+                        help="Host of the `trl vllm-serve` rollout server (trl 0.16+).")
+    parser.add_argument("--vllm_server_port", type=int, default=8000,
+                        help="Port of the `trl vllm-serve` rollout server (trl 0.16+).")
+    parser.add_argument("--vllm_server_timeout", type=float, default=600.0,
+                        help="Seconds to wait for the rollout server to come up before failing.")
     parser.add_argument("--num_generations", type=int, default=8)
     parser.add_argument("--num_train_epochs", type=float, default=4)
+    parser.add_argument("--max_steps", type=int, default=-1,
+                        help="Override num_train_epochs (smoke tests). -1 = unset.")
     parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--beta", type=float, default=0.04)
     parser.add_argument("--max_prompt_length", type=int, default=2048)
@@ -130,6 +142,7 @@ def main() -> None:
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "num_train_epochs": args.num_train_epochs,
+        "max_steps": args.max_steps,
         "max_grad_norm": 0.5,
         "beta": args.beta,
         "bf16": True,
@@ -146,11 +159,17 @@ def main() -> None:
         # DAPO Clip-Higher (trl 0.15+)
         "epsilon": args.epsilon,
         "epsilon_high": args.epsilon_high,
-        # vLLM rollout (varies by trl version)
+        # vLLM rollout (varies by trl version):
+        #   * 0.13–0.15: colocate-mode → vllm_device + vllm_gpu_memory_utilization
+        #   * 0.16+:     server-mode  → vllm_server_host + vllm_server_port (start
+        #                               `trl vllm-serve` separately on that host:port)
         "use_vllm": args.use_vllm,
         "vllm_device": args.vllm_device,
         "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
         "vllm_max_model_len": args.vllm_max_model_len,
+        "vllm_server_host": args.vllm_server_host,
+        "vllm_server_port": args.vllm_server_port,
+        "vllm_server_timeout": args.vllm_server_timeout,
     }, grpo_sig, label="train_grpo")
 
     config = GRPOConfig(**grpo_kwargs)

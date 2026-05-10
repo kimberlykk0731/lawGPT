@@ -1,0 +1,16 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: stages/stage1_sft_grpo/configs/ds_zero3_bf16.json
+  zero3_init_flag: true
+machine_rank: 0
+main_training_function: main
+num_machines: 1
+rdzv_backend: static
+same_network: true
+use_cpu: false
+# num_processes intentionally omitted — pass it on the `accelerate launch` CLI.
+# trl 0.14 GRPOTrainer reads accelerator.num_processes from the launcher and
+# verifies vllm_device (e.g. cuda:3) lies outside the training group; when
+# launched with `--num_processes=3` and CUDA_VISIBLE_DEVICES=0,1,2,3 it picks
+# 0/1/2 for training and leaves cuda:3 free for the vLLM rollout worker.

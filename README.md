@@ -406,8 +406,8 @@ Run name 命名约定：
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | transformers | ≥ 4.46 | `report_to=["swanlab"]` 需要 |
-| trl | ≥ 0.13, < 0.15 | GRPOConfig 支持 `epsilon_high`（Clip-Higher）；0.15+ 砍掉 `vllm_device`（改 server-mode），暂未迁移 |
-| vllm | ≥ 0.7 (< 0.8) | Dynamic Sampling / 蒸馏教师推理 / GRPO rollout；trl 0.13 的 GRPOTrainer 依赖 `vllm.sampling_params.GuidedDecodingParams`（首发 v0.6.5+），实测 0.7.x 最稳 |
+| trl | ≥ 0.16, < 0.18 | 0.16 起 GRPOConfig 同时具备 DAPO Clip-Higher (`epsilon`/`epsilon_high`) 和 colocate-mode `vllm_device`；0.18 砍 `vllm_device` 改用 `trl vllm-serve` server-mode，主链路未迁移故 cap 在 <0.18 |
+| vllm | ≥ 0.8, < 0.9 | trl 0.16+ 走 server-mode `trl vllm-serve`，需要 vllm 0.8 才有 EngineArgs.worker_extension_cls；vllm 0.8 也会把 torch 拉到 2.6+/cu124 |
 | deepspeed | ≥ 0.15 | ZeRO-3 bf16 |
 | swanlab | latest | wandb shim 在 `swanlab.integration.wandb` |
 | mergekit | latest | Stage 3 mergekit-moe |

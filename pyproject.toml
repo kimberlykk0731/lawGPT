@@ -14,9 +14,11 @@ dependencies = [
   "huggingface_hub",
   "torch>=2.4",
   "transformers>=4.46",
-  # trl 0.15+ removed GRPOConfig.vllm_device (switched to server-mode vLLM).
-  # Our train_grpo.py uses the colocate-mode API; pin to <0.15 until we migrate.
-  "trl>=0.13,<0.15",
+  # Sweet spot is trl 0.16.x / 0.17.x: GRPOConfig has BOTH DAPO Clip-Higher
+  # (`epsilon` / `epsilon_high`, added in 0.16) AND colocate-mode `vllm_device`
+  # (removed in 0.18 in favour of `trl vllm-serve` server-mode). We use both,
+  # so pin to <0.18.
+  "trl>=0.16,<0.18",
 ]
 
 [project.optional-dependencies]
@@ -25,9 +27,9 @@ dev = [
   "ruff",
 ]
 vllm = [
-  # vllm < 0.7 lacks vllm.sampling_params.GuidedDecodingParams which
-  # trl >= 0.13's GRPOTrainer imports unconditionally.
-  "vllm>=0.7,<0.8",
+  # trl 0.17 vllm-serve uses EngineArgs.worker_extension_cls (added in vllm 0.8).
+  # vllm 0.8 also pulls torch 2.6+ / cu124, which is what we run.
+  "vllm>=0.8,<0.9",
 ]
 deepspeed = [
   "deepspeed>=0.15",
