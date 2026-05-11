@@ -117,6 +117,9 @@ def main() -> None:
     # plotting (e.g. replay_stage2_swanlab.py).
     mean_acts: dict[int, dict[str, "torch.Tensor"]] = defaultdict(dict)
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    # First pass: compute every (domain, layer) record into the JSON report,
+    # but DON'T log to swanlab yet — we need to batch per-layer to get one
+    # multi-line chart per metric instead of N×D single-point charts.
     for domain, layers in activations.items():
         report[domain] = {}
         for layer_idx, acts in sorted(layers.items()):
@@ -135,38 +138,51 @@ def main() -> None:
             }
             print(f"{domain} L{layer_idx} var={variance:.4f} "
                   f"top_experts={top_experts} top1_freq={top_freq:.3f}")
-            if wandb is not None:
-                wandb.log({
-                    f"moe/expert_var/L{layer_idx}/{domain}": variance,
-                    f"moe/top1_freq/L{layer_idx}/{domain}": top_freq,
-                })
 
-    # Cross-domain overlap (top-5 expert sets overlap rate per layer)
     domains = sorted(activations.keys())
-    if wandb is not None and len(domains) >= 2:
-        for layer_idx in sorted({l for d in activations for l in activations[d]}):
+    yticklabels = [_DOMAIN_LATIN.get(d, d) for d in domains]
+
+    # Second pass: one swanlab.log per layer, with all per-domain values in a
+    # single payload — produces one multi-line chart per metric, x=layer.
+    if wandb is not None:
+        layer_ids = sorted({l for d in activations for l in activations[d]})
+        for layer_idx in layer_ids:
+            payload = {}
+            for d in domains:
+                rec = report[d].get(f"L{layer_idx}")
+                if rec is None:
+                    continue
+                latin = _DOMAIN_LATIN.get(d, d)
+                payload[f"moe/expert_var/{latin}"] = rec["variance"]
+                payload[f"moe/top1_freq/{latin}"] = rec["top1_freq"]
+            # Cross-domain overlap (top-5 expert set overlap, scalar per layer)
             top5_per_domain = {
                 d: set(report[d][f"L{layer_idx}"]["top_experts"]) for d in domains
                 if f"L{layer_idx}" in report[d]
             }
-            pairs, overlap_sum = 0, 0
+            pairs, overlap_sum = 0, 0.0
             for i, d1 in enumerate(domains):
                 for d2 in domains[i + 1:]:
                     if d1 in top5_per_domain and d2 in top5_per_domain:
                         overlap_sum += len(top5_per_domain[d1] & top5_per_domain[d2]) / 5
                         pairs += 1
             overlap = overlap_sum / pairs if pairs else 0.0
-            wandb.log({f"moe/cross_domain_overlap/L{layer_idx}": overlap})
+            payload["moe/cross_domain_overlap"] = overlap
             overlap_records.append({"layer": layer_idx, "overlap": overlap})
+            wandb.log(payload, step=layer_idx)
 
-    # Per-domain mean variance / dead expert summary scalars
+    # Per-domain summary scalars (one chart per metric, one bar per domain).
     if wandb is not None:
+        mean_var_payload, sample_count_payload = {}, {}
         for domain, layers in activations.items():
             mean_var = sum(report[domain][f"L{l}"]["variance"] for l in layers) / max(len(layers), 1)
-            wandb.log({
-                f"moe/mean_variance/{domain}": mean_var,
-                f"moe/sample_count/{domain}": domain_counts[domain],
-            })
+            latin = _DOMAIN_LATIN.get(domain, domain)
+            mean_var_payload[f"moe/mean_variance/{latin}"] = mean_var
+            sample_count_payload[f"moe/sample_count/{latin}"] = domain_counts[domain]
+        if mean_var_payload:
+            wandb.log(mean_var_payload, step=0)
+        if sample_count_payload:
+            wandb.log(sample_count_payload, step=0)
 
     # Heat-map (domain × expert) per layer. Renders matplotlib figures and
     # logs them as swanlab Images so the resume screenshot is one click away.
@@ -243,9 +259,11 @@ def _log_heatmaps(mean_acts, args) -> None:
             png = heatmap_dir / f"L{layer_idx:02d}.png"
             fig.savefig(png, dpi=140)
         try:
-            swanlab.log({f"moe/heatmap/L{layer_idx}": swanlab.Image(fig)})
+            # One key with N steps so swanlab renders this as a single image
+            # panel with a layer-index slider, not N panels of one image each.
+            swanlab.log({"moe/heatmap": swanlab.Image(fig)}, step=layer_idx)
         except Exception as exc:  # noqa: BLE001
-            print(f"[analyze_router] swanlab.Image(L{layer_idx}) failed: {exc!r}")
+            print(f"[analyze_router] swanlab.Image(layer={layer_idx}) failed: {exc!r}")
         plt.close(fig)
     print(f"[analyze_router] heat-maps saved to {heatmap_dir} (highlights: {highlight_layers})")
 

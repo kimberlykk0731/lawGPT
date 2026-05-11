@@ -38,29 +38,45 @@ def main() -> None:
         config={"source": str(args.json), "replayed": True},
     )
 
-    # Per-(domain, layer) variance and top-1 expert frequency.
-    # swanlab needs a monotonic step; we assign each layer-index as the step
-    # so the dashboard renders the cross-layer trend cleanly.
-    for domain, layers in report.items():
-        for layer_key, vals in sorted(layers.items(), key=lambda kv: int(kv[0][1:])):
-            layer_idx = int(layer_key[1:])
-            wandb.log({
-                f"moe/expert_var/L{layer_idx}/{domain}": vals["variance"],
-                f"moe/top1_freq/L{layer_idx}/{domain}": vals["top1_freq"],
-            }, step=layer_idx)
+    # One chart per metric × domain (each domain = one line), x-axis = layer.
+    # Use latin domain names as part of the key so the dashboard legend reads
+    # cleanly even on font-tofu setups.
+    domains = sorted(report.keys())
+    layer_keys = sorted(
+        {k for layers in report.values() for k in layers},
+        key=lambda k: int(k[1:]),
+    )
+    for lk in layer_keys:
+        layer_idx = int(lk[1:])
+        payload = {}
+        for d in domains:
+            v = report[d].get(lk)
+            if v is None:
+                continue
+            latin = _DOMAIN_LATIN.get(d, d)
+            payload[f"moe/expert_var/{latin}"] = v["variance"]
+            payload[f"moe/top1_freq/{latin}"] = v["top1_freq"]
+        if payload:
+            wandb.log(payload, step=layer_idx)
 
-    # Cross-domain overlap per layer.
+    # Cross-domain overlap: one line, x = layer.
     for rec in overlap_records:
-        wandb.log({f"moe/cross_domain_overlap/L{rec['layer']}": rec["overlap"]},
+        wandb.log({"moe/cross_domain_overlap": rec["overlap"]},
                   step=int(rec["layer"]))
 
-    # Per-domain summary scalars.
+    # Per-domain summary scalars (latin keys for clean legend).
+    mean_var_payload = {}
+    sample_count_payload = {}
     for domain, layers in report.items():
         mean_var = sum(v["variance"] for v in layers.values()) / max(len(layers), 1)
-        wandb.log({
-            f"moe/mean_variance/{domain}": mean_var,
-            f"moe/sample_count/{domain}": domain_counts.get(domain, 0),
-        })
+        latin = _DOMAIN_LATIN.get(domain, domain)
+        mean_var_payload[f"moe/mean_variance/{latin}"] = mean_var
+        sample_count_payload[f"moe/sample_count/{latin}"] = domain_counts.get(domain, 0)
+    # Single step for the scalars so they're one bar / point per chart.
+    if mean_var_payload:
+        wandb.log(mean_var_payload, step=0)
+    if sample_count_payload:
+        wandb.log(sample_count_payload, step=0)
 
     # Heat-maps if the JSON has `mean_activation` (new schema). Old JSONs
     # only store top-5 indices, no full distribution — re-run analyze_router
@@ -102,7 +118,10 @@ def _log_heatmaps_from_json(report) -> None:
         {k for layers in report.values() for k in layers},
         key=lambda k: int(k[1:]),
     )
+    # ONE key `moe/heatmap` with N steps (one image per layer). swanlab
+    # renders this as a slider you can scrub through layers.
     for lk in layer_keys:
+        layer_idx = int(lk[1:])
         rows = []
         for d in domains:
             v = report[d].get(lk, {}).get("mean_activation")
@@ -116,13 +135,13 @@ def _log_heatmaps_from_json(report) -> None:
         ax.set_yticks(range(len(domains)))
         ax.set_yticklabels(yticklabels)
         ax.set_xlabel("expert id")
-        ax.set_title(f"Layer {lk[1:]} — activation share by domain")
+        ax.set_title(f"Layer {layer_idx} — activation share by domain")
         fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
         fig.tight_layout()
         try:
-            swanlab.log({f"moe/heatmap/{lk}": swanlab.Image(fig)})
+            swanlab.log({"moe/heatmap": swanlab.Image(fig)}, step=layer_idx)
         except Exception as exc:  # noqa: BLE001
-            print(f"[replay] swanlab.Image({lk}) failed: {exc!r}")
+            print(f"[replay] swanlab.Image(layer={layer_idx}) failed: {exc!r}")
         plt.close(fig)
 
 
