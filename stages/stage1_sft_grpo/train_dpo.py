@@ -112,6 +112,14 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path, trust_remote_code=True, torch_dtype="bfloat16",
     )
+    # trl's DPOTrainer falls back to `create_reference_model(model)` if no
+    # ref_model is supplied, and that helper deepcopy's the policy — which
+    # fails under ZeRO-3 because the policy params have already been sharded
+    # across ranks. Load a second copy from the same checkpoint and let
+    # DeepSpeed wrap it as a separate frozen ref model.
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        args.model_path, trust_remote_code=True, torch_dtype="bfloat16",
+    )
 
     rows = [json.loads(line) for line in args.preference_jsonl.open(encoding="utf-8") if line.strip()]
     dataset = Dataset.from_list(rows)
@@ -136,6 +144,7 @@ def main() -> None:
 
     trainer = DPOTrainer(
         model=model,
+        ref_model=ref_model,
         args=config,
         train_dataset=dataset,
         processing_class=tokenizer,
