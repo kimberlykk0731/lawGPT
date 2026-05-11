@@ -78,7 +78,18 @@ def main() -> None:
     print(f"[replay] backfilled {len(report)} domains × {sum(len(l) for l in report.values())} layer scalars to swanlab")
 
 
+_DOMAIN_LATIN = {
+    "刑事": "criminal",
+    "民事": "civil",
+    "商事": "commercial",
+    "行政": "administrative",
+    "知产": "IP",
+}
+
+
 def _log_heatmaps_from_json(report) -> None:
+    """Render heat-maps from the JSON's mean_activation tensors. Domain labels
+    are rendered in latin to avoid CJK-tofu when no Chinese font is installed."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -86,6 +97,7 @@ def _log_heatmaps_from_json(report) -> None:
     import swanlab
 
     domains = sorted(report.keys())
+    yticklabels = [_DOMAIN_LATIN.get(d, d) for d in domains]
     layer_keys = sorted(
         {k for layers in report.values() for k in layers},
         key=lambda k: int(k[1:]),
@@ -102,7 +114,7 @@ def _log_heatmaps_from_json(report) -> None:
         fig, ax = plt.subplots(figsize=(max(8, mat.shape[1] / 16), 0.6 * len(domains) + 1.2))
         im = ax.imshow(mat, aspect="auto", cmap="magma")
         ax.set_yticks(range(len(domains)))
-        ax.set_yticklabels(domains)
+        ax.set_yticklabels(yticklabels)
         ax.set_xlabel("expert id")
         ax.set_title(f"Layer {lk[1:]} — activation share by domain")
         fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)

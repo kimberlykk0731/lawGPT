@@ -186,8 +186,21 @@ def main() -> None:
         wandb.finish()
 
 
+_DOMAIN_LATIN = {
+    "刑事": "criminal",
+    "民事": "civil",
+    "商事": "commercial",
+    "行政": "administrative",
+    "知产": "IP",
+}
+
+
 def _log_heatmaps(mean_acts, args) -> None:
     """Render one (domain × expert) heat-map per layer and push to swanlab.
+
+    Domain labels are rendered in latin (criminal / civil / …) because
+    the box has no CJK fonts installed; matplotlib falls back to tofu
+    boxes otherwise. The underlying data is unchanged.
 
     A few hand-picked deep layers are saved as PNGs under outputs/heatmaps/
     so the resume screenshot can come straight from disk if swanlab is offline.
@@ -202,6 +215,7 @@ def _log_heatmaps(mean_acts, args) -> None:
     heatmap_dir.mkdir(parents=True, exist_ok=True)
 
     domains = sorted({d for layer in mean_acts.values() for d in layer})
+    yticklabels = [_DOMAIN_LATIN.get(d, d) for d in domains]
     sorted_layers = sorted(mean_acts.keys())
     # Highlight the last quarter of layers (deepest, where domain clustering
     # is typically strongest) plus a couple of shallow ones for contrast.
@@ -219,7 +233,7 @@ def _log_heatmaps(mean_acts, args) -> None:
         fig, ax = plt.subplots(figsize=(max(8, args.num_experts / 16), 0.6 * len(domains) + 1.2))
         im = ax.imshow(mat, aspect="auto", cmap="magma")
         ax.set_yticks(range(len(domains)))
-        ax.set_yticklabels(domains)
+        ax.set_yticklabels(yticklabels)
         ax.set_xlabel("expert id")
         ax.set_title(f"Layer {layer_idx} — activation share by domain (top-{args.top_k} per token)")
         fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
