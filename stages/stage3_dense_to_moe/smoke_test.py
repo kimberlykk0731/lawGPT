@@ -27,9 +27,10 @@ PROMPTS = [
 
 def _swanlab_init(args: argparse.Namespace):
     try:
-        from swanlab.integration.wandb import wandb
+        import swanlab  # noqa: F401
     except ImportError:
         return None
+    from stages._swanlab_shim import wandb
     wandb.init(
         project=args.swanlab_project,
         name=args.swanlab_run_name,

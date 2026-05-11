@@ -137,7 +137,8 @@ class DistillTrainer(Trainer):
         loss = self.alpha * ce_loss + (1 - self.alpha) * kl_loss
 
         try:
-            from swanlab.integration.wandb import wandb
+            import swanlab  # noqa: F401
+            from stages._swanlab_shim import wandb
             if wandb.run is not None and self.state.global_step % self.args.logging_steps == 0:
                 with torch.no_grad():
                     student_full_probs = F.softmax(student_logits.float(), dim=-1)

@@ -79,7 +79,8 @@ class DomainAuxTrainer(Trainer):
         )
         loss = lm_loss + self.aux_weight * aux
         try:
-            from swanlab.integration.wandb import wandb
+            import swanlab  # noqa: F401
+            from stages._swanlab_shim import wandb
             if wandb.run is not None and self.state.global_step % self.args.logging_steps == 0:
                 wandb.log({
                     "loss/lm_ce": lm_loss.item(),

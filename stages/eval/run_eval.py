@@ -91,7 +91,8 @@ def main() -> None:
     wandb = None
     if args.swanlab_run_name:
         try:
-            from swanlab.integration.wandb import wandb as _wandb
+            import swanlab  # noqa: F401
+            from stages._swanlab_shim import wandb as _wandb
             _wandb.init(
                 project=args.swanlab_project,
                 name=args.swanlab_run_name,

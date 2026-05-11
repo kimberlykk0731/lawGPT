@@ -36,10 +36,11 @@ def load_eval_set(path: Path) -> list[dict]:
 
 def _swanlab_init(args: argparse.Namespace):
     try:
-        from swanlab.integration.wandb import wandb
+        import swanlab  # noqa: F401
     except ImportError:
         print("[analyze_router] swanlab not installed; logging only to stdout/JSON")
         return None
+    from stages._swanlab_shim import wandb
     wandb.init(
         project=args.swanlab_project,
         name=args.swanlab_run_name,

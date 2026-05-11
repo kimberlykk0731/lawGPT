@@ -38,9 +38,10 @@ class SwanLabLegalMetricsCallback(TrainerCallback):
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         try:
-            from swanlab.integration.wandb import wandb
+            import swanlab  # noqa: F401
         except ImportError:
             return
+        from stages._swanlab_shim import wandb
         if wandb.run is None:
             return
         extra = flush_rlvr_metrics()
