@@ -10,8 +10,11 @@
 #   smoke_after  router re-analysis on the fine-tuned model
 #
 # Usage:
-#   bash scripts/run_stage3.sh                # all four phases
-#   bash scripts/run_stage3.sh upcycle smoke  # subset
+#   bash scripts/run_stage3.sh                          # all four phases
+#   bash scripts/run_stage3.sh upcycle smoke            # subset
+#   bash scripts/run_stage3.sh sft -- --resume_from_checkpoint auto
+#                                                       # forward extra flags
+#                                                       # to train_sft.py via `--`
 #
 # Env knobs:
 #   STAGE3_BASE=/local_data/kzy/models/Qwen3-1.7B
@@ -70,10 +73,19 @@ run_sft() {
     --per_device_train_batch_size 2 --gradient_accumulation_steps 4 \
     --bf16 --gradient_checkpointing \
     --save_steps 500 \
-    --swanlab_run_name "${SWANLAB_RUN_NAME:-stage3-moe-sft-v1}"
+    --swanlab_run_name "${SWANLAB_RUN_NAME:-stage3-moe-sft-v1}" \
+    "${EXTRA_ARGS[@]}"
 }
 
-phases=("$@")
+# Split positional args into phase names and `--`-suffixed extra args
+# forwarded to the inner trainer (e.g. --resume_from_checkpoint auto).
+phases=()
+EXTRA_ARGS=()
+seen_sep=0
+for a in "$@"; do
+  if [[ "$a" == "--" ]]; then seen_sep=1; continue; fi
+  if [[ $seen_sep -eq 1 ]]; then EXTRA_ARGS+=("$a"); else phases+=("$a"); fi
+done
 if [[ ${#phases[@]} -eq 0 ]]; then
   phases=(upcycle smoke sft smoke_after)
 fi
