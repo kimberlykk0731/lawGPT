@@ -48,12 +48,15 @@ run_upcycle() {
 }
 
 run_smoke() {
-  local model=$1 run=$2
-  echo "[stage3] smoke $run on cuda:$SMOKE_GPU"
+  local model=$1 run=$2 dump=$3 compare=${4:-}
+  echo "[stage3] smoke $run on cuda:$SMOKE_GPU (dump=$dump compare=${compare:-none})"
+  extra=(--dump_json "$dump")
+  [[ -n "$compare" ]] && extra+=(--compare_to "$compare")
   CUDA_VISIBLE_DEVICES="$SMOKE_GPU" python stages/stage3_dense_to_moe/smoke_test.py \
     --model "$model" \
     --top_k 2 --num_experts 8 \
-    --swanlab_run_name "$run"
+    --swanlab_run_name "$run" \
+    "${extra[@]}"
 }
 
 run_sft() {
@@ -89,12 +92,14 @@ done
 if [[ ${#phases[@]} -eq 0 ]]; then
   phases=(upcycle smoke sft smoke_after)
 fi
+SMOKE_BEFORE_JSON=${SMOKE_BEFORE_JSON:-outputs/stage3_smoke_before.json}
+SMOKE_AFTER_JSON=${SMOKE_AFTER_JSON:-outputs/stage3_smoke_after.json}
 for phase in "${phases[@]}"; do
   case "$phase" in
     upcycle)     run_upcycle ;;
-    smoke)       run_smoke "$STAGE3_MOE" stage3-smoke-test ;;
+    smoke)       run_smoke "$STAGE3_MOE"     stage3-smoke-test       "$SMOKE_BEFORE_JSON" ;;
     sft)         run_sft ;;
-    smoke_after) run_smoke "$STAGE3_MOE_SFT" stage3-smoke-test-after ;;
+    smoke_after) run_smoke "$STAGE3_MOE_SFT" stage3-smoke-test-after "$SMOKE_AFTER_JSON" "$SMOKE_BEFORE_JSON" ;;
     *) echo "unknown phase: $phase" >&2; exit 2 ;;
   esac
 done
