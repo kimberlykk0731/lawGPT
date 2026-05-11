@@ -111,11 +111,17 @@ def main() -> None:
 
     report: dict[str, dict[str, object]] = {}
     overlap_records: list[dict] = []
+    # mean_acts[layer_idx][domain] = 128-dim tensor of per-expert activation share.
+    # Kept around so we can render the (domain × expert) heat-map per layer
+    # without recomputing — and also dumped into the JSON for downstream
+    # plotting (e.g. replay_stage2_swanlab.py).
+    mean_acts: dict[int, dict[str, "torch.Tensor"]] = defaultdict(dict)
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     for domain, layers in activations.items():
         report[domain] = {}
         for layer_idx, acts in sorted(layers.items()):
             mean_act = torch.stack(acts).mean(0)
+            mean_acts[layer_idx][domain] = mean_act
             variance = mean_act.var().item()
             top_experts = mean_act.topk(5).indices.tolist()
             top_freq = mean_act[top_experts[0]].item()
@@ -123,6 +129,9 @@ def main() -> None:
                 "variance": variance,
                 "top_experts": top_experts,
                 "top1_freq": top_freq,
+                # Full per-expert activation share (128 floats). Needed for the
+                # heat-map; cheap relative to the rest of the JSON.
+                "mean_activation": [float(x) for x in mean_act.tolist()],
             }
             print(f"{domain} L{layer_idx} var={variance:.4f} "
                   f"top_experts={top_experts} top1_freq={top_freq:.3f}")
@@ -159,6 +168,14 @@ def main() -> None:
                 f"moe/sample_count/{domain}": domain_counts[domain],
             })
 
+    # Heat-map (domain × expert) per layer. Renders matplotlib figures and
+    # logs them as swanlab Images so the resume screenshot is one click away.
+    if wandb is not None and mean_acts:
+        try:
+            _log_heatmaps(mean_acts, args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[analyze_router] heat-map logging skipped: {exc!r}")
+
     args.output_json.write_text(json.dumps({
         "report": report,
         "cross_domain_overlap": overlap_records,
@@ -167,6 +184,56 @@ def main() -> None:
     print(f"[done] wrote {args.output_json}")
     if wandb is not None:
         wandb.finish()
+
+
+def _log_heatmaps(mean_acts, args) -> None:
+    """Render one (domain × expert) heat-map per layer and push to swanlab.
+
+    A few hand-picked deep layers are saved as PNGs under outputs/heatmaps/
+    so the resume screenshot can come straight from disk if swanlab is offline.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import swanlab
+
+    heatmap_dir = args.output_json.parent / "heatmaps"
+    heatmap_dir.mkdir(parents=True, exist_ok=True)
+
+    domains = sorted({d for layer in mean_acts.values() for d in layer})
+    sorted_layers = sorted(mean_acts.keys())
+    # Highlight the last quarter of layers (deepest, where domain clustering
+    # is typically strongest) plus a couple of shallow ones for contrast.
+    deepest = sorted_layers[-min(4, len(sorted_layers)):]
+    sample_shallow = sorted_layers[: min(2, len(sorted_layers))]
+    highlight_layers = sorted(set(deepest + sample_shallow))
+
+    for layer_idx in sorted_layers:
+        rows = []
+        for d in domains:
+            t = mean_acts[layer_idx].get(d)
+            rows.append(t.cpu().numpy() if t is not None else np.zeros(args.num_experts))
+        mat = np.stack(rows, axis=0)  # (n_domains, num_experts)
+
+        fig, ax = plt.subplots(figsize=(max(8, args.num_experts / 16), 0.6 * len(domains) + 1.2))
+        im = ax.imshow(mat, aspect="auto", cmap="magma")
+        ax.set_yticks(range(len(domains)))
+        ax.set_yticklabels(domains)
+        ax.set_xlabel("expert id")
+        ax.set_title(f"Layer {layer_idx} — activation share by domain (top-{args.top_k} per token)")
+        fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+        fig.tight_layout()
+
+        if layer_idx in highlight_layers:
+            png = heatmap_dir / f"L{layer_idx:02d}.png"
+            fig.savefig(png, dpi=140)
+        try:
+            swanlab.log({f"moe/heatmap/L{layer_idx}": swanlab.Image(fig)})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[analyze_router] swanlab.Image(L{layer_idx}) failed: {exc!r}")
+        plt.close(fig)
+    print(f"[analyze_router] heat-maps saved to {heatmap_dir} (highlights: {highlight_layers})")
 
 
 if __name__ == "__main__":
