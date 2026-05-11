@@ -1,0 +1,20 @@
+# Caches / venv
+__pycache__/
+*.pyc
+.venv/
+.venv_lawgpt/
+.DS_Store
+
+# Local secrets — keep SWANLAB_API_KEY etc. out of the repo
+scripts/secrets.sh
+
+# Generated artefacts
+outputs/
+swanlog/
+logs/
+data/processed/
+ckpts/
+
+# IDE
+.vscode/
+.idea/

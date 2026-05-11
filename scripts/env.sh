@@ -64,3 +64,15 @@ export PIP_DEFAULT_TIMEOUT=120
 # Repo conventions
 export PYTHONPATH=$LAWGPT_HOME:${PYTHONPATH:-}
 cd $LAWGPT_HOME 2>/dev/null || true
+
+# Optional secrets file (untracked — put SWANLAB_API_KEY etc. here so it
+# survives across panes/sessions). Create with:
+#   cat > $LAWGPT_HOME/scripts/secrets.sh <<EOF
+#   export SWANLAB_API_KEY=...
+#   export SWANLAB_PROJECT=legalgpt-2026
+#   EOF
+#   chmod 600 $LAWGPT_HOME/scripts/secrets.sh
+if [ -f "$LAWGPT_HOME/scripts/secrets.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$LAWGPT_HOME/scripts/secrets.sh"
+fi
